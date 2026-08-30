@@ -1,12 +1,30 @@
-use pinocchio::{AccountView, Address, ProgramResult, default_panic_handler, no_allocator};
+//! Program entrypoint.
 
+#![allow(unexpected_cfgs)]
+
+use pinocchio::{
+    AccountView, Address, ProgramResult, default_panic_handler, error::ProgramError, no_allocator,
+    program_entrypoint,
+};
+
+use crate::instruction::init_multisig::process_init_multisig;
+
+program_entrypoint!(process_instruction);
 no_allocator!();
 default_panic_handler!();
 
+/// Routes an instruction by its leading discriminator byte.
+///
+/// | Byte | Instruction |
+/// |------|-------------|
+/// | `0`  | [`process_init_multisig`] |
 pub fn process_instruction(
     program_id: &Address,
     accounts: &mut [AccountView],
     instruction_data: &[u8],
 ) -> ProgramResult {
-    Ok(())
+    match instruction_data.split_first() {
+        Some((0, rest)) => process_init_multisig(program_id, accounts, rest),
+        _ => Err(ProgramError::InvalidInstructionData),
+    }
 }
