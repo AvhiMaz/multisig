@@ -5,27 +5,30 @@
 //!
 //! # Accounts
 //!
-//! 0. `creator`        - signer, pays rent, and is the PDA seed
-//! 1. `multisig`       - PDA `["multisig", creator]`, created here
-//! 2. `system_program`
+//! 0. `creator`        - signer, pays rent
+//! 1. `create_key`     - signer, ephemeral keypair seeding the PDA
+//! 2. `multisig`       - PDA `["multisig", create_key]`, created here
+//! 3. `system_program`
 
 use pinocchio::{
     AccountView, Address, ProgramResult,
     cpi::{Seed, Signer},
-    error::ProgramError,
     sysvars::{Sysvar, rent::Rent},
 };
 use pinocchio_system::{ID, instructions::CreateAccount};
 
 use crate::{
     constants::{MAX_OWNER, MULTISIG_SEED},
+    error::MultisigError,
+    helper::{check_signer, validate_eq},
     state::multisig::Multisig,
+    utils::{impl_len, impl_load},
 };
 
 /// Payload for [`process_init_multisig`].
 ///
 /// `owners` is always sent at full width so the payload stays fixed-size and
-/// parseable in place.
+/// parseable in place, and must be strictly ascending.
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 pub struct InitMultisigData {
@@ -37,24 +40,12 @@ pub struct InitMultisigData {
     pub threshold: u8,
     /// PDA bump. Unvalidated: `invoke_signed` rejects a wrong one.
     pub bump: u8,
-    /// Reserved, must be zero.
+    /// Reserved.
     pub _pad: [u8; 1],
 }
 
-impl InitMultisigData {
-    /// Size of the payload in bytes.
-    pub const LEN: usize = core::mem::size_of::<Self>();
-
-    /// Reads instruction data as [`InitMultisigData`], checking length.
-    fn load(data: &[u8]) -> Result<&Self, ProgramError> {
-        if data.len() != Self::LEN {
-            Err(ProgramError::InvalidInstructionData)
-        } else {
-            // SAFETY: length checked above; every field is byte-aligned.
-            Ok(unsafe { &*(data.as_ptr() as *const Self) })
-        }
-    }
-}
+impl_len!(InitMultisigData);
+impl_load!(InitMultisigData);
 
 /// Creates and initializes a multisig configuration account.
 pub fn process_init_multisig(
@@ -62,50 +53,47 @@ pub fn process_init_multisig(
     accounts: &mut [AccountView],
     instruction: &[u8],
 ) -> ProgramResult {
-    let [creator, multisig, system_program, _remaining @ ..] = accounts else {
-        return Err(ProgramError::NotEnoughAccountKeys);
+    let [
+        creator,
+        create_key,
+        multisig,
+        system_program,
+        _remaining @ ..,
+    ] = accounts
+    else {
+        return Err(MultisigError::NotEnoughAccounts.into());
     };
 
-    if !creator.is_signer() {
-        return Err(ProgramError::MissingRequiredSignature);
-    }
+    check_signer(creator, MultisigError::MissingSignature.into())?;
 
-    if system_program.address() != &ID {
-        return Err(ProgramError::IncorrectProgramId);
-    }
+    // The create_key must sign so nobody can squat a PDA on someone else's key.
+    check_signer(create_key, MultisigError::MissingSignature.into())?;
+
+    validate_eq(
+        system_program.address(),
+        &ID,
+        MultisigError::InvalidProgramId.into(),
+    )?;
 
     // Pre-funded alone is enough to mean the address is already in use.
     if !multisig.is_data_empty() || multisig.lamports() != 0 {
-        return Err(ProgramError::AccountAlreadyInitialized);
+        return Err(MultisigError::AlreadyInitialized.into());
     }
 
     let data = InitMultisigData::load(instruction)?;
     let owners_count = data.owners_count as usize;
 
+    // Bounded here because the count indexes the array below. Every other rule
+    // is left to `Multisig::invariant`.
     if owners_count == 0 || owners_count > MAX_OWNER {
-        return Err(ProgramError::InvalidInstructionData);
-    }
-
-    // Unanimous is valid; only an unreachable threshold is rejected.
-    if data.threshold == 0 || data.threshold > data.owners_count {
-        return Err(ProgramError::InvalidInstructionData);
-    }
-
-    // A repeated key would take two bitmap positions, letting one signer meet a
-    // threshold of two alone.
-    for i in 0..owners_count {
-        for j in (i + 1)..owners_count {
-            if data.owners[i] == data.owners[j] {
-                return Err(ProgramError::InvalidInstructionData);
-            }
-        }
+        return Err(MultisigError::InvalidOwnerCount.into());
     }
 
     let bump = [data.bump];
 
     let seeds = [
         Seed::from(MULTISIG_SEED),
-        Seed::from(creator.address().as_array()),
+        Seed::from(create_key.address().as_array()),
         Seed::from(&bump),
     ];
 
@@ -125,11 +113,11 @@ pub fn process_init_multisig(
 
     let state = Multisig::load_mut(multisig_data)?;
 
-    state.creator = *creator.address();
+    state.create_key = *create_key.address();
     state.owners = data.owners;
 
-    // Trailing slots are caller-controlled bytes; zero them so a later
-    // add_owner cannot promote leftover data.
+    // Trailing slots are caller-controlled bytes; zero them so the stored owner
+    // set is canonical and a later add_owner cannot promote leftover data.
     for slot in state.owners[owners_count..].iter_mut() {
         *slot = Address::default();
     }
@@ -139,6 +127,7 @@ pub fn process_init_multisig(
     state.bump = data.bump;
     state._pad = [0u8; 5];
     state.transaction_index = 0;
+    state.stale_transaction_index = 0;
 
-    Ok(())
+    state.invariant()
 }
