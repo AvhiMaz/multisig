@@ -4,3 +4,4 @@
 //! the wire format.
 
 pub mod multisig;
+pub mod transaction;

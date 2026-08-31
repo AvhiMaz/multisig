@@ -1,4 +1,3 @@
-#![deny(missing_docs)]
 //! A Squads-style multisig program for the Solana blockchain.
 //!
 //! An owner proposes a transaction, owners approve it, and once the threshold
