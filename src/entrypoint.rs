@@ -7,7 +7,7 @@ use pinocchio::{
     program_entrypoint,
 };
 
-use crate::instruction::init_multisig::process_init_multisig;
+use crate::instruction::{process_create_transaction, process_init_multisig};
 
 program_entrypoint!(process_instruction);
 no_allocator!();
@@ -18,6 +18,7 @@ default_panic_handler!();
 /// | Byte | Instruction |
 /// |------|-------------|
 /// | `0`  | [`process_init_multisig`] |
+/// | `1`  | [`process_create_transaction`] |
 pub fn process_instruction(
     program_id: &Address,
     accounts: &mut [AccountView],
@@ -25,6 +26,7 @@ pub fn process_instruction(
 ) -> ProgramResult {
     match instruction_data.split_first() {
         Some((0, rest)) => process_init_multisig(program_id, accounts, rest),
+        Some((1, rest)) => process_create_transaction(program_id, accounts, rest),
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }
