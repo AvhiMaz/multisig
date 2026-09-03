@@ -50,6 +50,14 @@ impl Multisig {
         self.owners().binary_search(owner).ok()
     }
 
+    /// Rejections that make approval unreachable.
+    ///
+    /// With `n` owners and threshold `t`, once `n - t + 1` have rejected, the
+    /// owners left cannot reach `t`.
+    pub fn cutoff(&self) -> u8 {
+        self.owners_count.saturating_sub(self.threshold) + 1
+    }
+
     /// Marks every existing transaction stale.
     ///
     /// Must be called by anything that changes `owners`, `owners_count`, or
