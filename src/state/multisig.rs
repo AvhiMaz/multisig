@@ -5,6 +5,7 @@ use pinocchio::{Address, error::ProgramError};
 use crate::{
     constants::{MAX_OWNER, MAX_TIME_LOCK},
     error::MultisigError,
+    state::permission::Permission,
     utils::{impl_len, impl_load},
 };
 
@@ -16,9 +17,14 @@ use crate::{
 pub struct Multisig {
     /// Ephemeral key seeding the PDA, so one wallet can create many multisigs.
     pub create_key: Address,
+    /// Where reclaimed rent goes when a proposal or buffer is closed. The
+    /// default address means "refund whoever paid".
+    pub rent_collector: Address,
     /// Owner set, strictly ascending. Only the first `owners_count` entries are
     /// live; the rest are zeroed.
     pub owners: [Address; MAX_OWNER],
+    /// Permission mask per owner, positionally matching `owners`.
+    pub permissions: [u8; MAX_OWNER],
     /// Live entries in `owners`, in `1..=MAX_OWNER`.
     pub owners_count: u8,
     /// Approvals needed to execute, in `1..=owners_count`.
@@ -26,15 +32,21 @@ pub struct Multisig {
     /// Cached PDA bump.
     pub bump: u8,
     /// Aligns `time_lock` to 4 bytes.
-    pub _pad: [u8; 1],
+    pub _pad: [u8; 3],
     /// Seconds that must pass between a proposal being approved and executed.
     /// Zero disables the delay.
     pub time_lock: u32,
+    /// Aligns `transaction_index` to 8 bytes.
+    pub _pad2: [u8; 4],
     /// Seeds the next transaction PDA. Never reused.
     pub transaction_index: u64,
     /// Transactions at or below this index predate the last change to the owner
     /// set or threshold, so they may no longer be voted on.
     pub stale_transaction_index: u64,
+    /// Proposals closed so far. When this reaches `transaction_index` every
+    /// proposal ever created has been reclaimed, which is the only way to know
+    /// on-chain that closing the multisig strands nothing.
+    pub closed_transaction_count: u64,
 }
 
 impl_len!(Multisig);
@@ -59,6 +71,26 @@ impl Multisig {
     /// owners left cannot reach `t`.
     pub fn cutoff(&self) -> u8 {
         self.owners_count.saturating_sub(self.threshold) + 1
+    }
+
+    /// Whether `owner` holds `permission`.
+    ///
+    /// A mask of zero is read as full permission, so a multisig created before
+    /// permissions existed, or one that simply does not use them, behaves as
+    /// every owner being able to do everything.
+    pub fn has_permission(&self, owner: &Address, permission: u8) -> bool {
+        match self.is_owner(owner) {
+            Some(index) => {
+                let mask = self.permissions[index];
+                mask == 0 || mask & permission != 0
+            }
+            None => false,
+        }
+    }
+
+    /// Whether every proposal ever created has been closed.
+    pub fn all_transactions_closed(&self) -> bool {
+        self.closed_transaction_count == self.transaction_index
     }
 
     /// Marks every existing transaction stale.
@@ -89,12 +121,31 @@ impl Multisig {
             }
         }
 
-        if self.stale_transaction_index > self.transaction_index {
+        if self.stale_transaction_index > self.transaction_index
+            || self.closed_transaction_count > self.transaction_index
+        {
             return Err(MultisigError::InvalidAccountData.into());
         }
 
         if self.time_lock > MAX_TIME_LOCK {
             return Err(MultisigError::InvalidTimeLock.into());
+        }
+
+        // Permissions live outside the enum's bits only if a client invented
+        // one, which would silently grant nothing.
+        for mask in &self.permissions[..count] {
+            if *mask > Permission::ALL {
+                return Err(MultisigError::UnknownPermission.into());
+            }
+        }
+
+        // A multisig nobody can vote in is bricked.
+        if !self
+            .owners()
+            .iter()
+            .any(|o| self.has_permission(o, Permission::VOTE))
+        {
+            return Err(MultisigError::NoVoters.into());
         }
 
         Ok(())

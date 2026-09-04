@@ -8,4 +8,6 @@ crate-type = ["cdylib", "lib"]
 
 [dependencies]
 pinocchio = "0.11.2"
+pinocchio-pubkey = "0.3.0"
 pinocchio-system = "0.6.1"
+solana-sha256-hasher = "2.3.0"

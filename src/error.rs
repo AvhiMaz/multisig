@@ -52,6 +52,25 @@ pub enum MultisigError {
     InvalidTimeLock = 21,
     /// The multisig's time lock has not elapsed since approval.
     TimeLockNotReleased = 22,
+    /// The compiled transaction message is malformed or references an
+    /// out-of-range account index.
+    InvalidMessage = 23,
+    /// An inner instruction references more accounts than a CPI may carry.
+    TooManyAccounts = 24,
+    /// The buffer has not received every byte it committed to.
+    BufferIncomplete = 25,
+    /// The buffer's contents do not match the hash committed at creation.
+    BufferHashMismatch = 26,
+    /// A lookup table account is malformed or an index runs past its addresses.
+    InvalidLookupTable = 27,
+    /// An owner carries a permission bit this program does not define.
+    UnknownPermission = 28,
+    /// No owner is permitted to vote, which would brick the multisig.
+    NoVoters = 29,
+    /// The signer lacks the permission this instruction requires.
+    Unauthorized = 30,
+    /// Proposals remain unclosed, so closing the multisig would strand them.
+    TransactionsOutstanding = 31,
 }
 
 impl From<MultisigError> for ProgramError {

@@ -3,6 +3,10 @@
 //! Any owner may propose. The proposal starts with no votes; the proposer
 //! approves separately if they want to.
 //!
+//! The payload is a three-byte header followed by a compiled message, and the
+//! account is sized to exactly that message. A proposal therefore costs rent
+//! for what it carries rather than for a worst case.
+//!
 //! # Accounts
 //!
 //! 0. `creator`        - signer, must be an owner, pays rent
@@ -18,43 +22,41 @@ use pinocchio::{
 use pinocchio_system::{ID, instructions::CreateAccount};
 
 use crate::{
-    constants::{MAX_IX_ACCOUNTS, MAX_IX_DATA, MAX_OWNER, TRANSACTION_SEED},
+    constants::{MAX_EPHEMERAL_SIGNERS, MAX_MESSAGE_SIZE, MAX_OWNER, TRANSACTION_SEED},
     error::MultisigError,
     helper::{check_owner, check_signer, validate_eq},
     state::{
+        message::TransactionMessage,
         multisig::Multisig,
-        transaction::{Transaction, TransactionStatus, TxAccountMeta},
+        permission::Permission,
+        transaction::{Transaction, TransactionStatus},
     },
-    utils::{impl_len, impl_load},
 };
 
-/// Payload for [`process_create_transaction`].
+/// Fixed header of the [`process_create_transaction`] payload, followed by the
+/// compiled message.
 ///
-/// `accounts` and `ix_data` are sent at full width so the payload stays
-/// fixed-size and parseable in place; trailing entries are zeroed on write.
+/// Packed so it parses at any alignment: instruction data is not guaranteed to
+/// land on a word boundary.
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
-pub struct CreateTransactionData {
-    /// Program the proposed instruction invokes.
-    pub target_program: Address,
-    /// Account list the proposed instruction expects, in order.
-    pub accounts: [TxAccountMeta; MAX_IX_ACCOUNTS],
-    /// Proposed instruction payload.
-    pub ix_data: [u8; MAX_IX_DATA],
-    /// Live length of `ix_data`.
-    pub ix_data_len: u32,
-    /// Live entries in `accounts`.
-    pub account_count: u8,
-    /// Which vault signs the CPI at execution.
+pub struct CreateTransactionHeader {
+    /// Which vault signs the CPIs at execution.
     pub vault_index: u8,
     /// Bump for that vault PDA. Verified at execution, not here.
     pub vault_bump: u8,
     /// Bump for this transaction PDA. Unvalidated: `invoke_signed` rejects a wrong one.
     pub bump: u8,
+    /// Ephemeral signer PDAs this proposal may sign with.
+    pub ephemeral_count: u8,
+    /// Cached bumps for those PDAs.
+    pub ephemeral_bumps: [u8; MAX_EPHEMERAL_SIGNERS],
 }
 
-impl_len!(CreateTransactionData);
-impl_load!(CreateTransactionData);
+impl CreateTransactionHeader {
+    /// Size of the header in bytes.
+    pub const LEN: usize = core::mem::size_of::<Self>();
+}
 
 /// Creates a proposal against `multisig`.
 pub fn process_create_transaction(
@@ -89,24 +91,71 @@ pub fn process_create_transaction(
         return Err(MultisigError::AlreadyInitialized.into());
     }
 
-    let data = CreateTransactionData::load(instruction)?;
-
-    let account_count = data.account_count as usize;
-    let ix_data_len = data.ix_data_len as usize;
-
-    // Bounded here because both index the arrays below.
-    if account_count > MAX_IX_ACCOUNTS || ix_data_len > MAX_IX_DATA {
+    if instruction.len() < CreateTransactionHeader::LEN {
         return Err(MultisigError::InvalidInstructionData.into());
     }
+
+    // SAFETY: length checked above, and every field is a byte.
+    let header = unsafe { &*(instruction.as_ptr() as *const CreateTransactionHeader) };
+    let message = &instruction[CreateTransactionHeader::LEN..];
+
+    init_proposal(
+        program_id,
+        creator,
+        multisig,
+        transaction,
+        message,
+        header.vault_index,
+        header.vault_bump,
+        header.bump,
+        header.ephemeral_count,
+        header.ephemeral_bumps,
+    )
+}
+
+/// Reserves the next transaction index, creates the proposal PDA sized to
+/// `message`, and writes the header.
+///
+/// Shared with `create_from_buffer`, which supplies a message assembled across
+/// several transactions rather than one carried in the instruction.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn init_proposal(
+    program_id: &Address,
+    creator: &AccountView,
+    multisig: &mut AccountView,
+    transaction: &mut AccountView,
+    message: &[u8],
+    vault_index: u8,
+    vault_bump: u8,
+    bump: u8,
+    ephemeral_count: u8,
+    ephemeral_bumps: [u8; MAX_EPHEMERAL_SIGNERS],
+) -> ProgramResult {
+    if ephemeral_count as usize > MAX_EPHEMERAL_SIGNERS {
+        return Err(MultisigError::InvalidInstructionData.into());
+    }
+
+    if message.len() > MAX_MESSAGE_SIZE {
+        return Err(MultisigError::InvalidMessage.into());
+    }
+
+    // Reject a malformed message now rather than mid-CPI at execution, when
+    // some of its instructions may already have run.
+    TransactionMessage::parse(message)?;
 
     // Reserve the index, in its own scope so the multisig borrow ends before
     // the transaction account is borrowed.
     let index = {
+        // SAFETY: the only live borrow at this point.
         let multisig_data = unsafe { multisig.borrow_unchecked_mut() };
         let ms = Multisig::load_mut(multisig_data)?;
 
         if ms.is_owner(creator.address()).is_none() {
             return Err(MultisigError::NotAnOwner.into());
+        }
+
+        if !ms.has_permission(creator.address(), Permission::INITIATE) {
+            return Err(MultisigError::Unauthorized.into());
         }
 
         // Index 0 means "no transactions yet", so the first proposal is 1.
@@ -120,22 +169,23 @@ pub fn process_create_transaction(
     };
 
     let index_bytes = index.to_le_bytes();
-    let bump = [data.bump];
+    let bump_byte = [bump];
 
     let seeds = [
         Seed::from(TRANSACTION_SEED),
         Seed::from(multisig.address().as_array()),
         Seed::from(&index_bytes),
-        Seed::from(&bump),
+        Seed::from(&bump_byte),
     ];
 
     let signer_seeds = Signer::from(&seeds[..]);
+    let space = Transaction::space(message.len());
 
     CreateAccount {
         from: creator,
         to: transaction,
-        space: Transaction::LEN as u64,
-        lamports: Rent::get()?.minimum_balance_unchecked(Transaction::LEN),
+        space: space as u64,
+        lamports: Rent::get()?.minimum_balance_unchecked(space),
         owner: program_id,
     }
     .invoke_signed(&[signer_seeds])?;
@@ -143,43 +193,32 @@ pub fn process_create_transaction(
     // SAFETY: just created by the CPI above, so no other borrow is live.
     let transaction_data = unsafe { transaction.borrow_unchecked_mut() };
 
-    let state = Transaction::load_mut(transaction_data)?;
+    // The header has not been written yet, so `message_len` cannot be trusted
+    // to split the account.
+    let (state, stored_message) = Transaction::split_uninitialized(transaction_data)?;
 
     state.multisig = *multisig.address();
     state.creator = *creator.address();
-    state.target_program = data.target_program;
     state.index = index;
+    state.approved_at = 0;
 
     // No votes yet; the proposer approves separately if they want to.
     state.approved = [Address::default(); MAX_OWNER];
     state.rejected = [Address::default(); MAX_OWNER];
+    state.cancelled = [Address::default(); MAX_OWNER];
     state.approved_count = 0;
     state.rejected_count = 0;
+    state.cancelled_count = 0;
 
     state.status = TransactionStatus::Active as u8;
-    state.approved_at = 0;
-    state.bump = data.bump;
-    state.account_count = data.account_count;
-    state.vault_index = data.vault_index;
-    state.vault_bump = data.vault_bump;
-    state._pad = [0u8; 1];
-    state.ix_data_len = data.ix_data_len;
+    state.bump = bump;
+    state.vault_index = vault_index;
+    state.vault_bump = vault_bump;
+    state.ephemeral_count = ephemeral_count;
+    state.ephemeral_bumps = ephemeral_bumps;
+    state.message_len = message.len() as u32;
 
-    state.accounts = data.accounts;
-    state.ix_data = data.ix_data;
-
-    // Trailing entries are caller-controlled bytes; zero them so the stored
-    // proposal is canonical and execution cannot read leftover data.
-    for slot in state.accounts[account_count..].iter_mut() {
-        *slot = TxAccountMeta {
-            address: Address::default(),
-            is_signer: 0,
-            is_writable: 0,
-        };
-    }
-    for byte in state.ix_data[ix_data_len..].iter_mut() {
-        *byte = 0;
-    }
+    stored_message.copy_from_slice(message);
 
     state.invariant()
 }

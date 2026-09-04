@@ -1,8 +1,9 @@
 //! Execute an approved proposal.
 //!
 //! A proposal that targets another program is invoked with the vault PDA as
-//! signer. One that targets this program is a config action, applied in place
-//! rather than through a CPI back into ourselves.
+//! signer, one inner instruction at a time, in message order. One that targets
+//! this program is a config action, applied in place rather than through a CPI
+//! back into ourselves.
 //!
 //! Staleness is deliberately not checked: a proposal that reached `Approved`
 //! before the owner set changed stays executable, because it was approved under
@@ -14,8 +15,9 @@
 //! 1. `multisig`    - the configuration this proposal belongs to; writable when
 //!    the proposal is a config action
 //! 2. `transaction` - writable, the proposal being executed
-//! 3. `remaining`   - and onward: exactly the accounts recorded in the
-//!    proposal, in the same order. Empty for a config action.
+//! 3. `remaining`   - and onward: the message's static account keys in order,
+//!    then every lookup table's writable addresses, then every lookup table's
+//!    readonly addresses, then the lookup table accounts themselves
 
 use pinocchio::{
     AccountView, Address, ProgramResult,
@@ -25,17 +27,22 @@ use pinocchio::{
 };
 
 use crate::{
-    constants::{MAX_IX_ACCOUNTS, MAX_IX_DATA, VAULT_SEED},
+    constants::{
+        ADDRESS_LOOKUP_TABLE_ID, EPHEMERAL_SEED, LOOKUP_TABLE_DEACTIVATION_OFFSET,
+        LOOKUP_TABLE_META_SIZE, MAX_CPI_ACCOUNTS, MAX_EPHEMERAL_SIGNERS, VAULT_SEED,
+    },
     error::MultisigError,
     helper::{check_owner, check_signer, validate_eq},
     instruction::config_action::apply_config_action,
     state::{
+        message::TransactionMessage,
         multisig::Multisig,
+        permission::Permission,
         transaction::{Transaction, TransactionStatus},
     },
 };
 
-/// Invokes the proposal's stored instruction, signed by its vault.
+/// Invokes every instruction in the proposal's message, signed by its vault.
 pub fn process_execute(
     program_id: &Address,
     accounts: &mut [AccountView],
@@ -62,23 +69,23 @@ pub fn process_execute(
             return Err(MultisigError::NotAnOwner.into());
         }
 
+        if !ms.has_permission(executor.address(), Permission::EXECUTE) {
+            return Err(MultisigError::Unauthorized.into());
+        }
+
         ms.time_lock
     };
 
-    let self_target: bool;
-    let target_program: Address;
     let vault_index: u8;
     let vault_bump: u8;
-    let account_count: usize;
-    let ix_data_len: usize;
-    let mut ix_data = [0u8; MAX_IX_DATA];
-    let mut flags = [(false, false); MAX_IX_ACCOUNTS];
+    let ephemeral_count: usize;
+    let ephemeral_bumps: [u8; MAX_EPHEMERAL_SIGNERS];
 
     {
         // SAFETY: the multisig borrow ended with the scope above, so this is
         // the only live borrow.
         let transaction_data = unsafe { transaction.borrow_unchecked_mut() };
-        let state = Transaction::load_mut(transaction_data)?;
+        let (state, _) = Transaction::load_mut(transaction_data)?;
 
         validate_eq(
             &state.multisig,
@@ -103,80 +110,213 @@ pub fn process_execute(
             }
         }
 
-        // A proposal that targets this program is a config action, applied
-        // directly rather than through a CPI back into ourselves.
-        self_target = &state.target_program == program_id;
-
-        account_count = state.account_count as usize;
-        ix_data_len = state.ix_data_len as usize;
-
-        if self_target {
-            // A config action operates on the `multisig` account passed here,
-            // so it must carry no accounts of its own.
-            if account_count != 0 {
-                return Err(MultisigError::InvalidInstructionData.into());
-            }
-        } else {
-            if account_count == 0 || remaining.len() < account_count {
-                return Err(MultisigError::NotEnoughAccounts.into());
-            }
-
-            // The owners approved these accounts in this order. Without this
-            // check an executor could swap a destination and spend the
-            // approvals on a different instruction than the one voted for.
-            for (i, meta) in state.accounts().iter().enumerate() {
-                if remaining[i].address() != &meta.address {
-                    return Err(MultisigError::AccountMismatch.into());
-                }
-                flags[i] = (meta.is_writable != 0, meta.is_signer != 0);
-            }
-        }
-
-        target_program = state.target_program;
         vault_index = state.vault_index;
         vault_bump = state.vault_bump;
-        ix_data[..ix_data_len].copy_from_slice(state.ix_data());
+        ephemeral_count = state.ephemeral_count as usize;
+        ephemeral_bumps = state.ephemeral_bumps;
 
-        // Effects before interactions. The callee can invoke this program
-        // again, and a proposal still marked `Approved` would execute twice.
+        // Effects before interactions. A callee can invoke this program again,
+        // and a proposal still marked `Approved` would execute twice.
         state.status = TransactionStatus::Executed as u8;
         state.invariant()?;
     }
 
-    if self_target {
-        return apply_config_action(multisig, &ix_data[..ix_data_len]);
+    // Read the message in place rather than copying it to the stack: at
+    // `MAX_MESSAGE_SIZE` a copy alone would overflow the 4 KB frame. The
+    // borrow is safe to hold across the CPIs below because `transaction` is
+    // never one of the accounts passed to them.
+    let transaction_data = unsafe { transaction.borrow_unchecked() };
+    let (_, stored_message) = Transaction::load(transaction_data)?;
+
+    let message = TransactionMessage::parse(stored_message)?;
+
+    let num_static = message.header.num_account_keys as usize;
+    let num_all = message.num_all_keys();
+
+    if remaining.len() < num_all {
+        return Err(MultisigError::NotEnoughAccounts.into());
     }
 
     let views: &[AccountView] = remaining;
 
-    // Entries past `account_count` are never read; they only need a valid
-    // address so the array can be built.
-    let metas: [InstructionAccount; MAX_IX_ACCOUNTS] = core::array::from_fn(|i| {
-        let idx = if i < account_count { i } else { 0 };
-        InstructionAccount::new(views[idx].address(), flags[i].0, flags[i].1)
-    });
+    // The owners approved these keys in this order. Without this an executor
+    // could substitute accounts and spend the approvals on something else.
+    for (i, key) in message.account_keys.iter().enumerate() {
+        if views[i].address() != key {
+            return Err(MultisigError::AccountMismatch.into());
+        }
+    }
 
-    let ix = InstructionView {
-        program_id: &target_program,
-        data: &ix_data[..ix_data_len],
-        accounts: &metas[..account_count],
-    };
+    // Keys past the static ones come from lookup tables. Resolve them here
+    // rather than trusting the runtime: the approved message names a table and
+    // a set of indexes, and only the addresses those indexes actually hold may
+    // take part.
+    let num_lookups = message.header.num_lookups as usize;
+
+    if remaining.len() < num_all + num_lookups {
+        return Err(MultisigError::NotEnoughAccounts.into());
+    }
+
+    let mut writable_at = num_static;
+    let mut readonly_at = num_static + message.num_writable_lookup_keys();
+
+    for (i, lookup) in message.lookups().enumerate() {
+        let lookup = lookup?;
+        let table = &views[num_all + i];
+
+        validate_eq(
+            table.address(),
+            lookup.account_key,
+            MultisigError::AccountMismatch.into(),
+        )?;
+
+        validate_eq(
+            table.owner(),
+            &ADDRESS_LOOKUP_TABLE_ID,
+            MultisigError::IllegalOwner.into(),
+        )?;
+
+        // SAFETY: read-only borrow of a lookup table, which is never one of the
+        // accounts passed to the CPIs below.
+        let table_data = unsafe { table.borrow_unchecked() };
+
+        if table_data.len() < LOOKUP_TABLE_META_SIZE {
+            return Err(MultisigError::InvalidLookupTable.into());
+        }
+
+        // An active table has no deactivation slot. The runtime refuses to load
+        // a deactivated one when building the transaction, so this only ever
+        // fires on a table deactivated in the same slot, but it costs nothing
+        // to not depend on that.
+        let deactivation =
+            &table_data[LOOKUP_TABLE_DEACTIVATION_OFFSET..LOOKUP_TABLE_DEACTIVATION_OFFSET + 8];
+
+        if u64::from_le_bytes(deactivation.try_into().unwrap()) != u64::MAX {
+            return Err(MultisigError::InvalidLookupTable.into());
+        }
+
+        let addresses = &table_data[LOOKUP_TABLE_META_SIZE..];
+        let num_addresses = addresses.len() / 32;
+
+        for (indexes, cursor) in [
+            (lookup.writable_indexes, &mut writable_at),
+            (lookup.readonly_indexes, &mut readonly_at),
+        ] {
+            for index in indexes {
+                let index = *index as usize;
+
+                if index >= num_addresses {
+                    return Err(MultisigError::InvalidLookupTable.into());
+                }
+
+                let expected = &addresses[index * 32..index * 32 + 32];
+
+                if views[*cursor].address().as_array() != expected {
+                    return Err(MultisigError::AccountMismatch.into());
+                }
+
+                *cursor += 1;
+            }
+        }
+    }
 
     let index_byte = [vault_index];
     let bump_byte = [vault_bump];
 
-    let seeds = [
+    // Copied so the seeds hold no borrow of `multisig`, which a config action
+    // in the loop below needs mutably.
+    let multisig_key = *multisig.address();
+
+    let vault_seeds = [
         Seed::from(VAULT_SEED),
-        Seed::from(multisig.address().as_array()),
+        Seed::from(multisig_key.as_array()),
         Seed::from(&index_byte),
         Seed::from(&bump_byte),
     ];
 
-    let signer = Signer::from(&seeds[..]);
+    // Some instructions need a signature from something that is not the vault,
+    // most often a newly created account. Those signers are PDAs of this
+    // proposal, so only this proposal can produce them.
+    let transaction_key = *transaction.address();
 
-    invoke_signed_with_bounds::<MAX_IX_ACCOUNTS, AccountView>(
-        &ix,
-        &views[..account_count],
-        &[signer],
-    )
+    let ephemeral_index: [[u8; 1]; MAX_EPHEMERAL_SIGNERS] = core::array::from_fn(|i| [i as u8]);
+    let ephemeral_bump: [[u8; 1]; MAX_EPHEMERAL_SIGNERS] =
+        core::array::from_fn(|i| [ephemeral_bumps[i]]);
+
+    let ephemeral_seeds: [[Seed; 4]; MAX_EPHEMERAL_SIGNERS] = core::array::from_fn(|i| {
+        [
+            Seed::from(EPHEMERAL_SEED),
+            Seed::from(transaction_key.as_array()),
+            Seed::from(&ephemeral_index[i]),
+            Seed::from(&ephemeral_bump[i]),
+        ]
+    });
+
+    let signers: [Signer; 1 + MAX_EPHEMERAL_SIGNERS] = core::array::from_fn(|i| {
+        if i == 0 {
+            Signer::from(&vault_seeds[..])
+        } else {
+            Signer::from(&ephemeral_seeds[i - 1][..])
+        }
+    });
+
+    let signers = &signers[..1 + ephemeral_count];
+
+    for compiled in message.instructions() {
+        let compiled = compiled?;
+
+        let program_index = compiled.program_id_index as usize;
+        let account_count = compiled.account_indexes.len();
+
+        if account_count > MAX_CPI_ACCOUNTS {
+            return Err(MultisigError::TooManyAccounts.into());
+        }
+
+        // A config action is applied in place; invoking ourselves would only
+        // re-enter this handler.
+        if views[program_index].address() == program_id {
+            apply_config_action(multisig, executor, compiled.data)?;
+            continue;
+        }
+
+        // Entries past `account_count` are never read; they only need a valid
+        // value so the arrays can be built.
+        let metas: [InstructionAccount; MAX_CPI_ACCOUNTS] = core::array::from_fn(|i| {
+            let key_index = if i < account_count {
+                compiled.account_indexes[i] as usize
+            } else {
+                0
+            };
+
+            InstructionAccount::new(
+                views[key_index].address(),
+                message.is_writable(key_index),
+                message.is_signer(key_index),
+            )
+        });
+
+        let cpi_views: [&AccountView; MAX_CPI_ACCOUNTS] = core::array::from_fn(|i| {
+            let key_index = if i < account_count {
+                compiled.account_indexes[i] as usize
+            } else {
+                0
+            };
+
+            &views[key_index]
+        });
+
+        let ix = InstructionView {
+            program_id: views[program_index].address(),
+            data: compiled.data,
+            accounts: &metas[..account_count],
+        };
+
+        invoke_signed_with_bounds::<MAX_CPI_ACCOUNTS, &AccountView>(
+            &ix,
+            &cpi_views[..account_count],
+            signers,
+        )?;
+    }
+
+    Ok(())
 }

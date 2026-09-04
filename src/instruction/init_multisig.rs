@@ -114,7 +114,10 @@ pub fn process_init_multisig(
     let state = Multisig::load_mut(multisig_data)?;
 
     state.create_key = *create_key.address();
+    state.rent_collector = Address::default();
     state.owners = data.owners;
+    // Zero means every permission; a multisig opts in later via a config action.
+    state.permissions = [0u8; MAX_OWNER];
 
     // Trailing slots are caller-controlled bytes; zero them so the stored owner
     // set is canonical and a later add_owner cannot promote leftover data.
@@ -125,10 +128,12 @@ pub fn process_init_multisig(
     state.owners_count = data.owners_count;
     state.threshold = data.threshold;
     state.bump = data.bump;
-    state._pad = [0u8; 1];
+    state._pad = [0u8; 3];
     state.time_lock = 0;
+    state._pad2 = [0u8; 4];
     state.transaction_index = 0;
     state.stale_transaction_index = 0;
+    state.closed_transaction_count = 0;
 
     state.invariant()
 }

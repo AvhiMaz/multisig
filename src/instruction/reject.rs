@@ -17,6 +17,7 @@ use crate::{
     helper::{check_owner, check_signer, validate_eq},
     state::{
         multisig::Multisig,
+        permission::Permission,
         transaction::{Transaction, TransactionStatus},
     },
 };
@@ -48,13 +49,17 @@ pub fn process_reject(
             return Err(MultisigError::NotAnOwner.into());
         }
 
+        if !ms.has_permission(owner.address(), Permission::VOTE) {
+            return Err(MultisigError::Unauthorized.into());
+        }
+
         (ms.cutoff(), ms.stale_transaction_index)
     };
 
     // SAFETY: the multisig borrow ended with the scope above, so this is the
     // only live borrow.
     let transaction_data = unsafe { transaction.borrow_unchecked_mut() };
-    let state = Transaction::load_mut(transaction_data)?;
+    let (state, _) = Transaction::load_mut(transaction_data)?;
 
     validate_eq(
         &state.multisig,
