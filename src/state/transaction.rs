@@ -101,6 +101,9 @@ pub struct Transaction {
     pub accounts: [TxAccountMeta; MAX_IX_ACCOUNTS],
     /// Target instruction payload, of which the first `ix_data_len` bytes are live.
     pub ix_data: [u8; MAX_IX_DATA],
+    /// Unix time the proposal latched to `Approved`, or zero while `Active`.
+    /// The multisig's time lock is measured from here.
+    pub approved_at: i64,
 }
 
 impl_len!(Transaction);

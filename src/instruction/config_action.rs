@@ -18,6 +18,8 @@ pub enum ConfigAction {
     RemoveOwner = 1,
     /// Change the approval threshold. Payload is one byte.
     ChangeThreshold = 2,
+    /// Change the execution delay. Payload is a little-endian `u32`.
+    ChangeTimeLock = 3,
 }
 
 impl ConfigAction {
@@ -27,6 +29,7 @@ impl ConfigAction {
             0 => Ok(Self::AddOwner),
             1 => Ok(Self::RemoveOwner),
             2 => Ok(Self::ChangeThreshold),
+            3 => Ok(Self::ChangeTimeLock),
             _ => Err(MultisigError::UnknownConfigAction.into()),
         }
     }
@@ -49,6 +52,7 @@ pub fn apply_config_action(multisig: &mut AccountView, data: &[u8]) -> ProgramRe
         ConfigAction::AddOwner => add_owner(ms, payload)?,
         ConfigAction::RemoveOwner => remove_owner(ms, payload)?,
         ConfigAction::ChangeThreshold => change_threshold(ms, payload)?,
+        ConfigAction::ChangeTimeLock => change_time_lock(ms, payload)?,
     }
 
     // Approvals gathered under the old rules must not carry over to the new
@@ -129,6 +133,17 @@ fn change_threshold(ms: &mut Multisig, payload: &[u8]) -> ProgramResult {
     };
 
     ms.threshold = *threshold;
+
+    Ok(())
+}
+
+/// Sets a new execution delay. Range is checked by `invariant`.
+fn change_time_lock(ms: &mut Multisig, payload: &[u8]) -> ProgramResult {
+    let bytes: [u8; 4] = payload
+        .try_into()
+        .map_err(|_| MultisigError::InvalidInstructionData)?;
+
+    ms.time_lock = u32::from_le_bytes(bytes);
 
     Ok(())
 }

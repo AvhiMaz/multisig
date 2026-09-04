@@ -21,6 +21,7 @@ use pinocchio::{
     AccountView, Address, ProgramResult,
     cpi::{Seed, Signer, invoke_signed_with_bounds},
     instruction::{InstructionAccount, InstructionView},
+    sysvars::{Sysvar, clock::Clock},
 };
 
 use crate::{
@@ -52,7 +53,7 @@ pub fn process_execute(
     check_owner(multisig, program_id, MultisigError::IllegalOwner.into())?;
     check_owner(transaction, program_id, MultisigError::IllegalOwner.into())?;
 
-    {
+    let time_lock = {
         // SAFETY: read-only borrow, released with this scope.
         let multisig_data = unsafe { multisig.borrow_unchecked() };
         let ms = Multisig::load(multisig_data)?;
@@ -60,7 +61,9 @@ pub fn process_execute(
         if ms.is_owner(executor.address()).is_none() {
             return Err(MultisigError::NotAnOwner.into());
         }
-    }
+
+        ms.time_lock
+    };
 
     let self_target: bool;
     let target_program: Address;
@@ -85,6 +88,19 @@ pub fn process_execute(
 
         if state.status()? != TransactionStatus::Approved {
             return Err(MultisigError::InvalidStatus.into());
+        }
+
+        // The delay gives honest owners a window to cancel a proposal that
+        // was approved but should not run.
+        if time_lock > 0 {
+            let elapsed = Clock::get()?
+                .unix_timestamp
+                .checked_sub(state.approved_at)
+                .ok_or(MultisigError::Overflow)?;
+
+            if elapsed < i64::from(time_lock) {
+                return Err(MultisigError::TimeLockNotReleased.into());
+            }
         }
 
         // A proposal that targets this program is a config action, applied

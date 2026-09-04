@@ -48,6 +48,10 @@ pub enum MultisigError {
     OwnerAlreadyExists = 19,
     /// A self-targeted proposal carries an unknown config action byte.
     UnknownConfigAction = 20,
+    /// The time lock exceeds `MAX_TIME_LOCK`.
+    InvalidTimeLock = 21,
+    /// The multisig's time lock has not elapsed since approval.
+    TimeLockNotReleased = 22,
 }
 
 impl From<MultisigError> for ProgramError {

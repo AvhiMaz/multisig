@@ -9,7 +9,10 @@
 //! 1. `multisig`    - supplies the threshold and the staleness marker
 //! 2. `transaction` - writable, the proposal being voted on
 
-use pinocchio::{AccountView, Address, ProgramResult};
+use pinocchio::{
+    AccountView, Address, ProgramResult,
+    sysvars::{Sysvar, clock::Clock},
+};
 
 use crate::{
     constants::MAX_OWNER,
@@ -95,9 +98,11 @@ pub fn process_approve(
     state.approved[pos] = *owner.address();
     state.approved_count += 1;
 
-    // Latch at the vote that crosses the threshold.
+    // Latch at the vote that crosses the threshold, and stamp the moment the
+    // multisig's time lock starts running from.
     if state.approved_count >= threshold {
         state.status = TransactionStatus::Approved as u8;
+        state.approved_at = Clock::get()?.unix_timestamp;
     }
 
     state.invariant()

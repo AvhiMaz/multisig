@@ -3,7 +3,7 @@
 use pinocchio::{Address, error::ProgramError};
 
 use crate::{
-    constants::MAX_OWNER,
+    constants::{MAX_OWNER, MAX_TIME_LOCK},
     error::MultisigError,
     utils::{impl_len, impl_load},
 };
@@ -25,8 +25,11 @@ pub struct Multisig {
     pub threshold: u8,
     /// Cached PDA bump.
     pub bump: u8,
-    /// Aligns `transaction_index` to 8 bytes.
-    pub _pad: [u8; 5],
+    /// Aligns `time_lock` to 4 bytes.
+    pub _pad: [u8; 1],
+    /// Seconds that must pass between a proposal being approved and executed.
+    /// Zero disables the delay.
+    pub time_lock: u32,
     /// Seeds the next transaction PDA. Never reused.
     pub transaction_index: u64,
     /// Transactions at or below this index predate the last change to the owner
@@ -88,6 +91,10 @@ impl Multisig {
 
         if self.stale_transaction_index > self.transaction_index {
             return Err(MultisigError::InvalidAccountData.into());
+        }
+
+        if self.time_lock > MAX_TIME_LOCK {
+            return Err(MultisigError::InvalidTimeLock.into());
         }
 
         Ok(())

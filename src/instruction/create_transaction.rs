@@ -157,6 +157,7 @@ pub fn process_create_transaction(
     state.rejected_count = 0;
 
     state.status = TransactionStatus::Active as u8;
+    state.approved_at = 0;
     state.bump = data.bump;
     state.account_count = data.account_count;
     state.vault_index = data.vault_index;

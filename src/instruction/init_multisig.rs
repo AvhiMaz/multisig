@@ -125,7 +125,8 @@ pub fn process_init_multisig(
     state.owners_count = data.owners_count;
     state.threshold = data.threshold;
     state.bump = data.bump;
-    state._pad = [0u8; 5];
+    state._pad = [0u8; 1];
+    state.time_lock = 0;
     state.transaction_index = 0;
     state.stale_transaction_index = 0;
 
