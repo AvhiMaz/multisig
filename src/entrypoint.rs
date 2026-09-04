@@ -8,7 +8,8 @@ use pinocchio::{
 };
 
 use crate::instruction::{
-    process_approve, process_create_transaction, process_init_multisig, process_reject,
+    process_approve, process_create_transaction, process_execute, process_init_multisig,
+    process_reject,
 };
 
 program_entrypoint!(process_instruction);
@@ -23,6 +24,7 @@ default_panic_handler!();
 /// | `1`  | [`process_create_transaction`] |
 /// | `2`  | [`process_approve`] |
 /// | `3`  | [`process_reject`] |
+/// | `4`  | [`process_execute`] |
 pub fn process_instruction(
     program_id: &Address,
     accounts: &mut [AccountView],
@@ -33,6 +35,7 @@ pub fn process_instruction(
         Some((1, rest)) => process_create_transaction(program_id, accounts, rest),
         Some((2, rest)) => process_approve(program_id, accounts, rest),
         Some((3, rest)) => process_reject(program_id, accounts, rest),
+        Some((4, rest)) => process_execute(program_id, accounts, rest),
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }
