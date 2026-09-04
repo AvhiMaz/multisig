@@ -9,6 +9,9 @@ on:
 permissions:
   contents: read
 
+env:
+  AGAVE_VERSION: stable
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -20,6 +23,11 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Install Agave toolchain
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/${AGAVE_VERSION}/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
       - name: Cache cargo registry and build
         uses: actions/cache@v4
         with:
@@ -28,6 +36,12 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache Agave platform tools
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/solana
+          key: ${{ runner.os }}-solana-${{ env.AGAVE_VERSION }}
 
       - name: Rustfmt
         run: cargo fmt --all -- --check
@@ -43,5 +57,14 @@ jobs:
       - name: Check
         run: cargo check --locked --all-targets
 
+      # The integration tests load this through Mollusk, so it has to exist
+      # before `cargo test` runs. `cargo test` builds the host crate, not the
+      # BPF binary.
+      - name: Build program
+        run: cargo build-sbf
+
       - name: Test
         run: cargo test --locked --all-targets
+
+      - name: Bench
+        run: cargo bench --bench compute_units
