@@ -1,10 +1,11 @@
-//! Program entrypoint.
+//! Program entrypoint. Routes incoming instructions to the correct handler
+//! based on the first byte of the instruction data.
 
 #![allow(unexpected_cfgs)]
 
 use pinocchio::{
-    AccountView, Address, ProgramResult, default_panic_handler, error::ProgramError, no_allocator,
-    program_entrypoint,
+    AccountView, Address, ProgramResult, address::declare_id, default_panic_handler,
+    error::ProgramError, no_allocator, program_entrypoint,
 };
 
 use crate::instruction::{
@@ -14,8 +15,12 @@ use crate::instruction::{
 };
 
 program_entrypoint!(process_instruction);
+
 no_allocator!();
+
 default_panic_handler!();
+
+declare_id!("4X5zUZ8apTxg8XJSwyxCR6TpDbLFBxm9TjECocLTKpAm");
 
 /// Routes an instruction by its leading discriminator byte.
 ///
@@ -37,6 +42,10 @@ pub fn process_instruction(
     accounts: &mut [AccountView],
     instruction_data: &[u8],
 ) -> ProgramResult {
+    if program_id != &ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
     match instruction_data.split_first() {
         Some((0, rest)) => process_init_multisig(program_id, accounts, rest),
         Some((1, rest)) => process_create_transaction(program_id, accounts, rest),

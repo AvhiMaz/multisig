@@ -8,7 +8,7 @@ use solana_pubkey::Pubkey;
 
 /// The program under test.
 pub const PROGRAM_ID: Pubkey =
-    solana_pubkey::pubkey!("8jmCwrtrrogXTGYi9HijeaFSPbQYAhf5TD4NT6Fy1GS2");
+    solana_pubkey::pubkey!("4X5zUZ8apTxg8XJSwyxCR6TpDbLFBxm9TjECocLTKpAm");
 
 /// The system program.
 pub const SYSTEM_ID: Pubkey = solana_pubkey::pubkey!("11111111111111111111111111111111");
