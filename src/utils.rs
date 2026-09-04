@@ -5,7 +5,6 @@ macro_rules! impl_len {
     ($t:ty) => {
         impl $t {
             /// Size of the account in bytes.
-            #[allow(dead_code)]
             pub const LEN: usize = core::mem::size_of::<Self>();
         }
     };
@@ -17,7 +16,6 @@ macro_rules! impl_load {
     ($t:ty) => {
         impl $t {
             /// Reads account data as this struct.
-            #[allow(dead_code)]
             pub fn load(data: &[u8]) -> Result<&Self, pinocchio::error::ProgramError> {
                 if data.len() != core::mem::size_of::<$t>()
                     || !(data.as_ptr() as usize).is_multiple_of(core::mem::align_of::<$t>())
@@ -30,7 +28,6 @@ macro_rules! impl_load {
             }
 
             /// Mutable counterpart of `load`.
-            #[allow(dead_code)]
             pub fn load_mut(data: &mut [u8]) -> Result<&mut Self, pinocchio::error::ProgramError> {
                 if data.len() != core::mem::size_of::<$t>()
                     || !(data.as_mut_ptr() as usize).is_multiple_of(core::mem::align_of::<$t>())

@@ -1,4 +1,5 @@
-//! A Squads-style multisig program for the Solana blockchain.
+#![deny(missing_docs)]
+//! A Squads-style multisig program.
 //!
 //! An owner proposes a transaction, owners approve it, and once the threshold
 //! is met anyone may execute it. Owner-set changes are ordinary proposals

@@ -16,7 +16,6 @@ pub fn check_signer(a: &AccountView, err: ProgramError) -> Result<(), ProgramErr
 ///
 /// Every caller-supplied state account needs this. Without it a forged account
 /// created under another program parses as valid state.
-#[allow(dead_code)]
 pub fn check_owner(
     a: &AccountView,
     program_id: &Address,
