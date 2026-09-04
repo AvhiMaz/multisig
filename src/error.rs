@@ -44,6 +44,10 @@ pub enum MultisigError {
     AccountMismatch = 17,
     /// An arithmetic operation overflowed.
     Overflow = 18,
+    /// The address is already an owner of this multisig.
+    OwnerAlreadyExists = 19,
+    /// A self-targeted proposal carries an unknown config action byte.
+    UnknownConfigAction = 20,
 }
 
 impl From<MultisigError> for ProgramError {

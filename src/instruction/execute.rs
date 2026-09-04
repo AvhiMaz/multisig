@@ -1,17 +1,21 @@
 //! Execute an approved proposal.
 //!
-//! The stored instruction is invoked with the vault PDA as signer. Staleness is
-//! deliberately not checked: a proposal that reached `Approved` before the owner
-//! set changed stays executable, because it was approved under the rules in
-//! force at the time.
+//! A proposal that targets another program is invoked with the vault PDA as
+//! signer. One that targets this program is a config action, applied in place
+//! rather than through a CPI back into ourselves.
+//!
+//! Staleness is deliberately not checked: a proposal that reached `Approved`
+//! before the owner set changed stays executable, because it was approved under
+//! the rules in force at the time.
 //!
 //! # Accounts
 //!
 //! 0. `executor`    - signer, must be an owner of `multisig`
-//! 1. `multisig`    - the configuration this proposal belongs to
+//! 1. `multisig`    - the configuration this proposal belongs to; writable when
+//!    the proposal is a config action
 //! 2. `transaction` - writable, the proposal being executed
 //! 3. `remaining`   - and onward: exactly the accounts recorded in the
-//!    proposal, in the same order
+//!    proposal, in the same order. Empty for a config action.
 
 use pinocchio::{
     AccountView, Address, ProgramResult,
@@ -23,6 +27,7 @@ use crate::{
     constants::{MAX_IX_ACCOUNTS, MAX_IX_DATA, VAULT_SEED},
     error::MultisigError,
     helper::{check_owner, check_signer, validate_eq},
+    instruction::config_action::apply_config_action,
     state::{
         multisig::Multisig,
         transaction::{Transaction, TransactionStatus},
@@ -57,6 +62,7 @@ pub fn process_execute(
         }
     }
 
+    let self_target: bool;
     let target_program: Address;
     let vault_index: u8;
     let vault_bump: u8;
@@ -81,28 +87,33 @@ pub fn process_execute(
             return Err(MultisigError::InvalidStatus.into());
         }
 
-        // Self-targeting is reserved for the owner-management payloads, which
-        // do not exist yet. Refusing it keeps a proposal from re-entering this
-        // program through the CPI below.
-        if &state.target_program == program_id {
-            return Err(MultisigError::InvalidAccount.into());
-        }
+        // A proposal that targets this program is a config action, applied
+        // directly rather than through a CPI back into ourselves.
+        self_target = &state.target_program == program_id;
 
         account_count = state.account_count as usize;
         ix_data_len = state.ix_data_len as usize;
 
-        if account_count == 0 || remaining.len() < account_count {
-            return Err(MultisigError::NotEnoughAccounts.into());
-        }
-
-        // The owners approved these accounts in this order. Without this check
-        // an executor could swap a destination and spend the approvals on a
-        // different instruction than the one that was voted for.
-        for (i, meta) in state.accounts().iter().enumerate() {
-            if remaining[i].address() != &meta.address {
-                return Err(MultisigError::AccountMismatch.into());
+        if self_target {
+            // A config action operates on the `multisig` account passed here,
+            // so it must carry no accounts of its own.
+            if account_count != 0 {
+                return Err(MultisigError::InvalidInstructionData.into());
             }
-            flags[i] = (meta.is_writable != 0, meta.is_signer != 0);
+        } else {
+            if account_count == 0 || remaining.len() < account_count {
+                return Err(MultisigError::NotEnoughAccounts.into());
+            }
+
+            // The owners approved these accounts in this order. Without this
+            // check an executor could swap a destination and spend the
+            // approvals on a different instruction than the one voted for.
+            for (i, meta) in state.accounts().iter().enumerate() {
+                if remaining[i].address() != &meta.address {
+                    return Err(MultisigError::AccountMismatch.into());
+                }
+                flags[i] = (meta.is_writable != 0, meta.is_signer != 0);
+            }
         }
 
         target_program = state.target_program;
@@ -114,6 +125,10 @@ pub fn process_execute(
         // again, and a proposal still marked `Approved` would execute twice.
         state.status = TransactionStatus::Executed as u8;
         state.invariant()?;
+    }
+
+    if self_target {
+        return apply_config_action(multisig, &ix_data[..ix_data_len]);
     }
 
     let views: &[AccountView] = remaining;
