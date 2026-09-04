@@ -88,9 +88,14 @@ impl Multisig {
         }
     }
 
-    /// Whether every proposal ever created has been closed.
-    pub fn all_transactions_closed(&self) -> bool {
-        self.closed_transaction_count == self.transaction_index
+    /// Whether the only proposal still open is the one currently executing.
+    ///
+    /// A close action rides inside a proposal, and that proposal is necessarily
+    /// still open while it runs, so it is excluded from the count. Comparing
+    /// against `transaction_index` directly would never hold and would make
+    /// closing impossible.
+    pub fn only_executing_transaction_open(&self) -> bool {
+        self.closed_transaction_count.checked_add(1) == Some(self.transaction_index)
     }
 
     /// Marks every existing transaction stale.

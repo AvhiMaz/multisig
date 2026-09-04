@@ -11,7 +11,8 @@
 //!
 //! # Accounts
 //!
-//! 0. `executor`    - signer, must be an owner of `multisig`
+//! 0. `executor`    - signer, must be an owner of `multisig`; writable, since
+//!    a config action that closes the multisig pays its rent here
 //! 1. `multisig`    - the configuration this proposal belongs to; writable when
 //!    the proposal is a config action
 //! 2. `transaction` - writable, the proposal being executed

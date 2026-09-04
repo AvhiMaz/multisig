@@ -57,9 +57,9 @@ jobs:
       - name: Check
         run: cargo check --locked --all-targets
 
-      # The integration tests load this through Mollusk, so it has to exist
-      # before `cargo test` runs. `cargo test` builds the host crate, not the
-      # BPF binary.
+      - name: Check without features
+        run: cargo check --locked --no-default-features
+
       - name: Build program
         run: cargo build-sbf
 

@@ -10,9 +10,17 @@ crate-type = ["cdylib", "lib"]
 pinocchio = "0.11.2"
 pinocchio-pubkey = "0.3.0"
 pinocchio-system = "0.6.1"
+solana-instruction = { version = "3", optional = true }
+solana-pubkey = { version = "3", optional = true, features = ["curve25519"] }
 solana-sha256-hasher = "2.3.0"
 
+[features]
+client = ["dep:solana-instruction", "dep:solana-pubkey"]
+
 [dev-dependencies]
+# Self-dependency so `cargo test` builds with the client feature on: the
+# integration tests drive the program through the client, not hand-rolled bytes.
+multisig = { path = ".", features = ["client"] }
 mollusk-svm = "0.15.1"
 mollusk-svm-bencher = "0.15.1"
 solana-account = "4.3"

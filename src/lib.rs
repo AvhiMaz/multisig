@@ -10,6 +10,8 @@ pub const ID: pinocchio::Address = pinocchio::Address::new_from_array(pinocchio_
     "8jmCwrtrrogXTGYi9HijeaFSPbQYAhf5TD4NT6Fy1GS2"
 ));
 
+#[cfg(feature = "client")]
+pub mod client;
 pub mod constants;
 pub mod error;
 pub mod instruction;

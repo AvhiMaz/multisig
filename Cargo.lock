@@ -1493,6 +1493,7 @@ version = "0.1.0"
 dependencies = [
  "mollusk-svm",
  "mollusk-svm-bencher",
+ "multisig",
  "pinocchio 0.11.2",
  "pinocchio-pubkey",
  "pinocchio-system",

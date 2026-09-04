@@ -377,20 +377,76 @@ fn an_unknown_action_is_refused() {
 }
 
 #[test]
-fn close_multisig_refuses_while_a_proposal_is_open() {
+fn close_multisig_reclaims_the_account() {
     let mollusk = setup();
     let f = fixture(&mollusk);
 
-    // The closing proposal is itself outstanding, so this can never succeed in
-    // one step, which is exactly the guard working.
-    run_config(
-        &mollusk,
-        &f,
-        1,
-        6,
+    // The closing proposal is the only one open, which is the one case the
+    // guard permits.
+    let result = run_config(&mollusk, &f, 1, 6, &[], &[], Check::success());
+
+    let ms = result.get_account(&f.multisig).unwrap();
+    assert_eq!(ms.lamports, 0, "multisig closed");
+    assert!(ms.data.is_empty(), "data cleared");
+}
+
+#[test]
+fn close_multisig_refuses_with_another_proposal_open() {
+    let mollusk = setup();
+    let f = fixture(&mollusk);
+
+    // Proposal 1 is left open, so the close carried by proposal 2 must refuse
+    // rather than strand it.
+    let (open_tx, open_bump) = transaction_pda(&f.multisig, 1);
+    let leave_open = create_transaction_ix(
+        &f.owners[0],
+        &f.multisig,
+        &open_tx,
+        &config_message(2, &[3u8]),
+        0,
+        0,
+        open_bump,
         &[],
+    );
+
+    let (close_tx, close_bump) = transaction_pda(&f.multisig, 2);
+    let close = create_transaction_ix(
+        &f.owners[0],
+        &f.multisig,
+        &close_tx,
+        &config_message(6, &[]),
+        0,
+        0,
+        close_bump,
         &[],
-        Check::err(ProgramError::Custom(err::TRANSACTIONS_OUTSTANDING)),
+    );
+    let approve_a = vote_ix(2, &f.owners[0], &f.multisig, &close_tx);
+    let approve_b = vote_ix(2, &f.owners[1], &f.multisig, &close_tx);
+    let execute = execute_ix(
+        &f.owners[0],
+        &f.multisig,
+        &close_tx,
+        &[AccountMeta::new_readonly(PROGRAM_ID, false)],
+    );
+
+    let mut accounts = f.accounts.clone();
+    accounts.push((open_tx, empty()));
+    accounts.push((close_tx, empty()));
+
+    mollusk.process_and_validate_instruction_chain(
+        &[
+            (&leave_open, &[Check::success()]),
+            (&close, &[Check::success()]),
+            (&approve_a, &[Check::success()]),
+            (&approve_b, &[Check::success()]),
+            (
+                &execute,
+                &[Check::err(ProgramError::Custom(
+                    err::TRANSACTIONS_OUTSTANDING,
+                ))],
+            ),
+        ],
+        &accounts,
     );
 }
 

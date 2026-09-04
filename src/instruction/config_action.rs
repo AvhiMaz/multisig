@@ -204,10 +204,10 @@ fn set_permission(ms: &mut Multisig, payload: &[u8]) -> ProgramResult {
 
 /// Closes the multisig and returns its rent.
 ///
-/// Refuses unless every proposal ever created has been closed. A `Transaction`
-/// names its multisig and every instruction that touches one checks that
-/// account, so closing the config while proposals remain would strand their
-/// rent permanently with no way to reclaim it.
+/// Refuses unless the only proposal still open is the one carrying this
+/// action. A `Transaction` names its multisig and every instruction that
+/// touches one checks that account, so closing the config while other
+/// proposals remain would strand their rent permanently.
 fn close_multisig(
     multisig: &mut AccountView,
     destination: &mut AccountView,
@@ -223,7 +223,7 @@ fn close_multisig(
         let multisig_data = unsafe { multisig.borrow_unchecked() };
         let ms = Multisig::load(multisig_data)?;
 
-        if !ms.all_transactions_closed() {
+        if !ms.only_executing_transaction_open() {
             return Err(MultisigError::TransactionsOutstanding.into());
         }
 

@@ -374,8 +374,9 @@ pub fn execute_ix(
     transaction: &Pubkey,
     message_accounts: &[AccountMeta],
 ) -> Instruction {
+    // Writable because a close action pays the reclaimed rent to the executor.
     let mut accounts = vec![
-        AccountMeta::new_readonly(*executor, true),
+        AccountMeta::new(*executor, true),
         AccountMeta::new(*multisig, false),
         AccountMeta::new(*transaction, false),
     ];
