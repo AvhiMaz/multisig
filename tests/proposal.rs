@@ -110,7 +110,7 @@ fn create_approve_execute_moves_lamports() {
 
     let tx = result.get_account(&transaction).unwrap();
     assert_eq!(tx.data[tx_off::STATUS], status::EXECUTED, "status");
-    assert_eq!(tx.data[tx_off::APPROVED_COUNT], 2, "approvals");
+    assert_eq!(u32_at(&tx.data, tx_off::APPROVED_COUNT), 2, "approvals");
     assert_eq!(tx.data[tx_off::VAULT_BUMP], f.vault_bump);
     assert_ne!(
         &tx.data[tx_off::APPROVED_AT..tx_off::APPROVED_AT + 8],
@@ -131,8 +131,8 @@ fn create_approve_execute_moves_lamports() {
 
     let ms = result.get_account(&f.multisig).unwrap();
     assert_eq!(
-        &ms.data[multisig_offset::TRANSACTION_INDEX..multisig_offset::TRANSACTION_INDEX + 8],
-        &1u64.to_le_bytes(),
+        u64_at(&ms.data, multisig_offset::TRANSACTION_INDEX),
+        1u64,
         "counter advanced"
     );
 }
@@ -374,7 +374,7 @@ fn rejections_reach_the_cutoff() {
 
     let tx = result.get_account(&transaction).unwrap();
     assert_eq!(tx.data[tx_off::STATUS], status::REJECTED);
-    assert_eq!(tx.data[tx_off::REJECTED_COUNT], 2);
+    assert_eq!(u32_at(&tx.data, tx_off::REJECTED_COUNT), 2);
 }
 
 #[test]
@@ -467,7 +467,7 @@ fn approved_proposal_needs_consensus_to_cancel() {
     );
 
     let tx = result.get_account(&transaction).unwrap();
-    assert_eq!(tx.data[tx_off::CANCELLED_COUNT], 2);
+    assert_eq!(u32_at(&tx.data, tx_off::CANCELLED_COUNT), 2);
     assert_eq!(tx.data[tx_off::STATUS], status::CANCELLED);
 }
 
@@ -514,9 +514,8 @@ fn closing_a_finished_proposal_refunds_rent() {
 
     let ms = result.get_account(&f.multisig).unwrap();
     assert_eq!(
-        &ms.data[multisig_offset::CLOSED_TRANSACTION_COUNT
-            ..multisig_offset::CLOSED_TRANSACTION_COUNT + 8],
-        &1u64.to_le_bytes(),
+        u64_at(&ms.data, multisig_offset::CLOSED_TRANSACTION_COUNT),
+        1u64,
         "closure counted"
     );
 }

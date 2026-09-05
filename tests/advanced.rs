@@ -241,12 +241,7 @@ fn a_time_lock_defers_execution() {
     );
     let config_a = vote_ix(2, &f.owners[0], &f.multisig, &config_tx);
     let config_b = vote_ix(2, &f.owners[1], &f.multisig, &config_tx);
-    let config_exec = execute_ix(
-        &f.owners[0],
-        &f.multisig,
-        &config_tx,
-        &[AccountMeta::new_readonly(PROGRAM_ID, false)],
-    );
+    let config_exec = execute_ix(&f.owners[0], &f.multisig, &config_tx, &config_accounts());
 
     let mut accounts = f.accounts.clone();
     accounts.push((config_tx, empty()));
@@ -356,7 +351,7 @@ fn a_config_change_makes_older_proposals_stale() {
         &f.owners[0],
         &f.multisig,
         &config_tx,
-        &config_message(2, &[3u8]),
+        &config_message(2, &3u32.to_le_bytes()),
         0,
         0,
         config_bump,
@@ -364,12 +359,7 @@ fn a_config_change_makes_older_proposals_stale() {
     );
     let config_a = vote_ix(2, &f.owners[0], &f.multisig, &config_tx);
     let config_b = vote_ix(2, &f.owners[1], &f.multisig, &config_tx);
-    let config_exec = execute_ix(
-        &f.owners[0],
-        &f.multisig,
-        &config_tx,
-        &[AccountMeta::new_readonly(PROGRAM_ID, false)],
-    );
+    let config_exec = execute_ix(&f.owners[0], &f.multisig, &config_tx, &config_accounts());
 
     let stale_vote = vote_ix(2, &f.owners[0], &f.multisig, &spend_tx);
 
@@ -416,12 +406,7 @@ fn permissions_gate_voting() {
     );
     let config_a = vote_ix(2, &f.owners[0], &f.multisig, &config_tx);
     let config_b = vote_ix(2, &f.owners[1], &f.multisig, &config_tx);
-    let config_exec = execute_ix(
-        &f.owners[0],
-        &f.multisig,
-        &config_tx,
-        &[AccountMeta::new_readonly(PROGRAM_ID, false)],
-    );
+    let config_exec = execute_ix(&f.owners[0], &f.multisig, &config_tx, &config_accounts());
 
     let destination = Pubkey::new_unique();
     let (spend_tx, spend_bump) = transaction_pda(&f.multisig, 2);

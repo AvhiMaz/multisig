@@ -135,7 +135,7 @@ fn upload_in_chunks_then_execute() {
         "message length recorded"
     );
     assert_eq!(
-        &tx.data[tx_off::HEADER_LEN..],
+        stored_message(&tx.data, 3),
         &message[..],
         "message stored verbatim"
     );

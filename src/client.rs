@@ -46,6 +46,8 @@ pub mod tag {
     pub const BUFFER_CLOSE: u8 = 9;
     /// `create_from_buffer`.
     pub const CREATE_FROM_BUFFER: u8 = 10;
+    /// `set_config`.
+    pub const SET_CONFIG: u8 = 11;
 }
 
 /// Config action discriminators, used as the first byte of a self-targeted
@@ -65,6 +67,13 @@ pub mod action {
     pub const SET_PERMISSION: u8 = 5;
     /// Close the multisig.
     pub const CLOSE_MULTISIG: u8 = 6;
+    /// Hand configuration control to a key, or return it to the owners.
+    pub const SET_CONFIG_AUTHORITY: u8 = 7;
+}
+
+/// Encodes a `u32` payload for `change_threshold` and `change_time_lock`.
+pub fn u32_payload(value: u32) -> [u8; 4] {
+    value.to_le_bytes()
 }
 
 /// Permission bits.
@@ -279,7 +288,10 @@ pub fn config_action(action: u8, payload: &[u8]) -> Message {
         num_signers: 0,
         num_writable_signers: 0,
         num_writable_non_signers: 0,
-        account_keys: vec![program_id()],
+        // The system program is named so a resize can pay rent through it. The
+        // instruction still references no accounts, which is what marks this a
+        // config action.
+        account_keys: vec![program_id(), SYSTEM_PROGRAM],
         instructions: vec![MessageInstruction {
             program_id_index: 0,
             account_indexes: vec![],
@@ -291,26 +303,39 @@ pub fn config_action(action: u8, payload: &[u8]) -> Message {
 
 /// Creates a multisig.
 ///
-/// `owners` must be sorted ascending and free of duplicates.
+/// `owners` must be sorted ascending and free of duplicates. A transaction
+/// caps how many fit here at roughly thirty; beyond that, create a small
+/// multisig and grow it with `add_owner`.
 pub fn init_multisig(
     creator: &Pubkey,
     create_key: &Pubkey,
     owners: &[Pubkey],
-    threshold: u8,
+    threshold: u32,
+) -> Instruction {
+    init_multisig_controlled(creator, create_key, owners, threshold, &Pubkey::default())
+}
+
+/// Creates a multisig controlled by `config_authority`, which may change its
+/// configuration without a vote. The default address leaves it autonomous.
+pub fn init_multisig_controlled(
+    creator: &Pubkey,
+    create_key: &Pubkey,
+    owners: &[Pubkey],
+    threshold: u32,
+    config_authority: &Pubkey,
 ) -> Instruction {
     let (multisig, bump) = multisig_address(create_key);
 
     let mut data = vec![tag::INIT_MULTISIG];
-    let mut payload = [0u8; 324];
+    data.extend_from_slice(&threshold.to_le_bytes());
+    data.extend_from_slice(&(owners.len() as u32).to_le_bytes());
+    data.push(bump);
+    data.extend_from_slice(&[0u8; 3]);
+    data.extend_from_slice(config_authority.as_ref());
 
-    for (i, owner) in owners.iter().take(MAX_OWNER).enumerate() {
-        payload[i * 32..(i + 1) * 32].copy_from_slice(owner.as_ref());
+    for owner in owners.iter().take(MAX_OWNER) {
+        data.extend_from_slice(owner.as_ref());
     }
-
-    payload[320] = owners.len() as u8;
-    payload[321] = threshold;
-    payload[322] = bump;
-    data.extend_from_slice(&payload);
 
     Instruction::new_with_bytes(
         program_id(),
@@ -516,6 +541,29 @@ pub fn create_from_buffer(
             AccountMeta::new(*multisig, false),
             AccountMeta::new(transaction, false),
             AccountMeta::new(*buffer, false),
+            AccountMeta::new_readonly(SYSTEM_PROGRAM, false),
+        ],
+    )
+}
+
+/// Applies a config action directly, on a controlled multisig.
+///
+/// Refused unless the multisig names `authority` as its config authority.
+pub fn set_config(
+    authority: &Pubkey,
+    multisig: &Pubkey,
+    action: u8,
+    payload: &[u8],
+) -> Instruction {
+    let mut data = vec![tag::SET_CONFIG, action];
+    data.extend_from_slice(payload);
+
+    Instruction::new_with_bytes(
+        program_id(),
+        &data,
+        vec![
+            AccountMeta::new(*authority, true),
+            AccountMeta::new(*multisig, false),
             AccountMeta::new_readonly(SYSTEM_PROGRAM, false),
         ],
     )

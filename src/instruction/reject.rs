@@ -5,19 +5,17 @@
 //!
 //! # Accounts
 //!
-//! 0. `owner`       - signer, must be an owner of `multisig`
+//! 0. `owner`       - signer, must be an owner permitted to vote
 //! 1. `multisig`    - supplies the cutoff and the staleness marker
 //! 2. `transaction` - writable, the proposal being voted on
 
 use pinocchio::{AccountView, Address, ProgramResult};
 
 use crate::{
-    constants::MAX_OWNER,
     error::MultisigError,
-    helper::{check_owner, check_signer, validate_eq},
+    instruction::vote::{check_votable, prepare},
     state::{
-        multisig::Multisig,
-        permission::Permission,
+        bitmap,
         transaction::{Transaction, TransactionStatus},
     },
 };
@@ -32,74 +30,26 @@ pub fn process_reject(
         return Err(MultisigError::NotEnoughAccounts.into());
     };
 
-    if !instruction.is_empty() {
-        return Err(MultisigError::InvalidInstructionData.into());
-    }
+    let voter = prepare(program_id, owner, multisig, transaction, instruction, true)?;
 
-    check_signer(owner, MultisigError::MissingSignature.into())?;
-    check_owner(multisig, program_id, MultisigError::IllegalOwner.into())?;
-    check_owner(transaction, program_id, MultisigError::IllegalOwner.into())?;
-
-    let (cutoff, stale_index) = {
-        // SAFETY: read-only borrow, released with this scope.
-        let multisig_data = unsafe { multisig.borrow_unchecked() };
-        let ms = Multisig::load(multisig_data)?;
-
-        if ms.is_owner(owner.address()).is_none() {
-            return Err(MultisigError::NotAnOwner.into());
-        }
-
-        if !ms.has_permission(owner.address(), Permission::VOTE) {
-            return Err(MultisigError::Unauthorized.into());
-        }
-
-        (ms.cutoff(), ms.stale_transaction_index)
-    };
-
-    // SAFETY: the multisig borrow ended with the scope above, so this is the
-    // only live borrow.
+    // SAFETY: the multisig borrow ended inside `prepare`.
     let transaction_data = unsafe { transaction.borrow_unchecked_mut() };
-    let (state, _) = Transaction::load_mut(transaction_data)?;
+    let (state, votes, _) = Transaction::load_mut(transaction_data)?;
 
-    validate_eq(
-        &state.multisig,
-        multisig.address(),
-        MultisigError::MultisigMismatch.into(),
-    )?;
+    check_votable(state, multisig, &voter, TransactionStatus::Active)?;
 
-    if state.status()? != TransactionStatus::Active {
-        return Err(MultisigError::InvalidStatus.into());
-    }
-
-    if state.index <= stale_index {
-        return Err(MultisigError::StaleTransaction.into());
-    }
-
-    if state.approvers().binary_search(owner.address()).is_ok() {
+    if votes.has_voted(voter.index) {
         return Err(MultisigError::AlreadyVoted.into());
     }
 
-    let pos = match state.rejecters().binary_search(owner.address()) {
-        Ok(_) => return Err(MultisigError::AlreadyVoted.into()),
-        Err(pos) => pos,
-    };
-
-    let count = state.rejected_count as usize;
-    if count >= MAX_OWNER {
-        return Err(MultisigError::InvalidAccountData.into());
+    if !bitmap::set(votes.rejected, voter.index) {
+        return Err(MultisigError::AlreadyVoted.into());
     }
 
-    // Shift right to keep `rejected` ascending, so `binary_search` stays valid.
-    let mut i = count;
-    while i > pos {
-        state.rejected[i] = state.rejected[i - 1];
-        i -= 1;
-    }
-    state.rejected[pos] = *owner.address();
     state.rejected_count += 1;
 
     // Latch once approval has become arithmetically impossible.
-    if state.rejected_count >= cutoff {
+    if state.rejected_count >= voter.cutoff {
         state.status = TransactionStatus::Rejected as u8;
     }
 

@@ -82,7 +82,7 @@ fn run_config(
     let approve_a = vote_ix(2, &f.owners[0], &f.multisig, &transaction);
     let approve_b = vote_ix(2, &f.owners[1], &f.multisig, &transaction);
 
-    let mut message_accounts = vec![AccountMeta::new_readonly(PROGRAM_ID, false)];
+    let mut message_accounts = config_accounts();
     message_accounts.extend_from_slice(extra_accounts);
 
     let execute = execute_ix(&f.owners[0], &f.multisig, &transaction, &message_accounts);
@@ -128,7 +128,7 @@ fn add_owner_inserts_in_sorted_position() {
     expected.sort();
 
     let ms = result.get_account(&f.multisig).unwrap();
-    assert_eq!(ms.data[ms_off::OWNERS_COUNT], 4);
+    assert_eq!(u32_at(&ms.data, ms_off::OWNERS_COUNT), 4);
 
     for (i, owner) in expected.iter().enumerate() {
         let at = ms_off::OWNERS + i * 32;
@@ -136,10 +136,7 @@ fn add_owner_inserts_in_sorted_position() {
     }
 
     // The change invalidated everything proposed before it.
-    assert_eq!(
-        &ms.data[ms_off::STALE_TRANSACTION_INDEX..ms_off::STALE_TRANSACTION_INDEX + 8],
-        &1u64.to_le_bytes()
-    );
+    assert_eq!(u64_at(&ms.data, ms_off::STALE_TRANSACTION_INDEX), 1u64);
 }
 
 #[test]
@@ -174,16 +171,26 @@ fn remove_owner_shifts_left() {
     );
 
     let ms = result.get_account(&f.multisig).unwrap();
-    assert_eq!(ms.data[ms_off::OWNERS_COUNT], 2);
+    assert_eq!(u32_at(&ms.data, ms_off::OWNERS_COUNT), 2);
+
     assert_eq!(
-        &ms.data[ms_off::OWNERS..ms_off::OWNERS + 32],
+        owner_at(&ms.data, 0),
         f.owners[1].as_ref(),
         "later owners shifted left"
     );
+    assert_eq!(owner_at(&ms.data, 1), f.owners[2].as_ref());
+
+    // The account shrank rather than leaving a vacated slot behind.
     assert_eq!(
-        &ms.data[ms_off::OWNERS + 64..ms_off::OWNERS + 96],
-        &[0u8; 32],
-        "vacated slot zeroed"
+        ms.data.len(),
+        ms_off::HEADER_LEN + 2 * 33,
+        "account resized down"
+    );
+
+    assert_eq!(
+        u32_at(&ms.data, ms_off::VOTER_COUNT),
+        2,
+        "the removed owner stopped counting as a voter"
     );
 }
 
@@ -239,10 +246,18 @@ fn change_threshold() {
     let mollusk = setup();
     let f = fixture(&mollusk);
 
-    let result = run_config(&mollusk, &f, 1, 2, &[3u8], &[], Check::success());
+    let result = run_config(
+        &mollusk,
+        &f,
+        1,
+        2,
+        &3u32.to_le_bytes(),
+        &[],
+        Check::success(),
+    );
 
     let ms = result.get_account(&f.multisig).unwrap();
-    assert_eq!(ms.data[ms_off::THRESHOLD], 3);
+    assert_eq!(u32_at(&ms.data, ms_off::THRESHOLD), 3);
 }
 
 #[test]
@@ -255,7 +270,7 @@ fn change_threshold_beyond_owner_count_is_refused() {
         &f,
         1,
         2,
-        &[9u8],
+        &9u32.to_le_bytes(),
         &[],
         Check::err(ProgramError::Custom(err::INVALID_THRESHOLD)),
     );
@@ -337,8 +352,8 @@ fn set_permission() {
     let result = run_config(&mollusk, &f, 1, 5, &payload, &[], Check::success());
 
     let ms = result.get_account(&f.multisig).unwrap();
-    assert_eq!(ms.data[ms_off::PERMISSIONS + 2], 6);
-    assert_eq!(ms.data[ms_off::PERMISSIONS], 0, "others untouched");
+    assert_eq!(permission_at(&ms.data, 2, 3), 6);
+    assert_eq!(permission_at(&ms.data, 0, 3), 0, "others untouched");
 }
 
 #[test]
@@ -402,7 +417,7 @@ fn close_multisig_refuses_with_another_proposal_open() {
         &f.owners[0],
         &f.multisig,
         &open_tx,
-        &config_message(2, &[3u8]),
+        &config_message(2, &3u32.to_le_bytes()),
         0,
         0,
         open_bump,
@@ -422,12 +437,7 @@ fn close_multisig_refuses_with_another_proposal_open() {
     );
     let approve_a = vote_ix(2, &f.owners[0], &f.multisig, &close_tx);
     let approve_b = vote_ix(2, &f.owners[1], &f.multisig, &close_tx);
-    let execute = execute_ix(
-        &f.owners[0],
-        &f.multisig,
-        &close_tx,
-        &[AccountMeta::new_readonly(PROGRAM_ID, false)],
-    );
+    let execute = execute_ix(&f.owners[0], &f.multisig, &close_tx, &config_accounts());
 
     let mut accounts = f.accounts.clone();
     accounts.push((open_tx, empty()));

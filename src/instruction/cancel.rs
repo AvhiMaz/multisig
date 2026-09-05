@@ -4,10 +4,9 @@
 //!
 //! While a proposal is `Active` nobody has committed to it, so its creator may
 //! withdraw it alone. Once it is `Approved` the owners have collectively agreed,
-//! and undoing that takes the same threshold that made it: each vote is
-//! recorded, and the proposal cancels when they reach the threshold. Without
-//! this second path a time lock would be half a feature, giving owners a window
-//! to notice a bad proposal but no way to stop it.
+//! and undoing that takes the same threshold that made it. Without the second
+//! path a time lock would be half a feature, giving owners a window to notice a
+//! bad proposal but no way to stop it.
 //!
 //! # Accounts
 //!
@@ -18,12 +17,11 @@
 use pinocchio::{AccountView, Address, ProgramResult};
 
 use crate::{
-    constants::MAX_OWNER,
     error::MultisigError,
-    helper::{check_owner, check_signer, validate_eq},
+    helper::validate_eq,
+    instruction::vote::{check_votable, prepare},
     state::{
-        multisig::Multisig,
-        permission::Permission,
+        bitmap,
         transaction::{Transaction, TransactionStatus},
     },
 };
@@ -38,37 +36,25 @@ pub fn process_cancel(
         return Err(MultisigError::NotEnoughAccounts.into());
     };
 
-    if !instruction.is_empty() {
-        return Err(MultisigError::InvalidInstructionData.into());
-    }
-
-    check_signer(signer, MultisigError::MissingSignature.into())?;
-    check_owner(multisig, program_id, MultisigError::IllegalOwner.into())?;
-    check_owner(transaction, program_id, MultisigError::IllegalOwner.into())?;
-
-    let (threshold, is_voter) = {
-        // SAFETY: read-only borrow, released with this scope.
-        let multisig_data = unsafe { multisig.borrow_unchecked() };
-        let ms = Multisig::load(multisig_data)?;
-
-        (
-            ms.threshold,
-            ms.has_permission(signer.address(), Permission::VOTE),
-        )
-    };
-
-    // SAFETY: the multisig borrow ended with the scope above.
-    let transaction_data = unsafe { transaction.borrow_unchecked_mut() };
-    let (state, _) = Transaction::load_mut(transaction_data)?;
-
-    validate_eq(
-        &state.multisig,
-        multisig.address(),
-        MultisigError::MultisigMismatch.into(),
+    // The creator path does not require the vote permission, so it is checked
+    // only on the branch that needs it.
+    let voter = prepare(
+        program_id,
+        signer,
+        multisig,
+        transaction,
+        instruction,
+        false,
     )?;
+
+    // SAFETY: the multisig borrow ended inside `prepare`.
+    let transaction_data = unsafe { transaction.borrow_unchecked_mut() };
+    let (state, votes, _) = Transaction::load_mut(transaction_data)?;
 
     match state.status()? {
         TransactionStatus::Active => {
+            check_votable(state, multisig, &voter, TransactionStatus::Active)?;
+
             validate_eq(
                 &state.creator,
                 signer.address(),
@@ -79,31 +65,23 @@ pub fn process_cancel(
         }
 
         TransactionStatus::Approved => {
-            if !is_voter {
+            check_votable(state, multisig, &voter, TransactionStatus::Approved)?;
+
+            if !voter.can_vote {
                 return Err(MultisigError::Unauthorized.into());
             }
 
-            let pos = match state.cancellers().binary_search(signer.address()) {
-                Ok(_) => return Err(MultisigError::AlreadyVoted.into()),
-                Err(pos) => pos,
-            };
-
-            let count = state.cancelled_count as usize;
-            if count >= MAX_OWNER {
-                return Err(MultisigError::InvalidAccountData.into());
+            if bitmap::get(votes.cancelled, voter.index) {
+                return Err(MultisigError::AlreadyVoted.into());
             }
 
-            // Shift right to keep `cancelled` ascending, so `binary_search`
-            // stays valid.
-            let mut i = count;
-            while i > pos {
-                state.cancelled[i] = state.cancelled[i - 1];
-                i -= 1;
+            if !bitmap::set(votes.cancelled, voter.index) {
+                return Err(MultisigError::AlreadyVoted.into());
             }
-            state.cancelled[pos] = *signer.address();
+
             state.cancelled_count += 1;
 
-            if state.cancelled_count >= threshold {
+            if state.cancelled_count >= voter.threshold {
                 state.status = TransactionStatus::Cancelled as u8;
             }
         }

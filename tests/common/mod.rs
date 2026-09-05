@@ -13,42 +13,42 @@ pub const PROGRAM_ID: Pubkey =
 /// The system program.
 pub const SYSTEM_ID: Pubkey = solana_pubkey::pubkey!("11111111111111111111111111111111");
 
-/// Offsets into a `Multisig` account, mirroring the on-chain layout.
+/// Offsets into a `Multisig` header. The owner set follows it.
 pub mod multisig_offset {
     pub const CREATE_KEY: usize = 0;
-    pub const RENT_COLLECTOR: usize = 32;
-    pub const OWNERS: usize = 64;
-    pub const PERMISSIONS: usize = 384;
-    pub const OWNERS_COUNT: usize = 394;
-    pub const THRESHOLD: usize = 395;
-    pub const BUMP: usize = 396;
-    pub const TIME_LOCK: usize = 400;
-    pub const TRANSACTION_INDEX: usize = 408;
-    pub const STALE_TRANSACTION_INDEX: usize = 416;
-    pub const CLOSED_TRANSACTION_COUNT: usize = 424;
-    pub const LEN: usize = 432;
+    pub const CONFIG_AUTHORITY: usize = 32;
+    pub const RENT_COLLECTOR: usize = 64;
+    pub const TRANSACTION_INDEX: usize = 96;
+    pub const STALE_TRANSACTION_INDEX: usize = 104;
+    pub const CLOSED_TRANSACTION_COUNT: usize = 112;
+    pub const TIME_LOCK: usize = 120;
+    pub const OWNERS_COUNT: usize = 124;
+    pub const VOTER_COUNT: usize = 128;
+    pub const THRESHOLD: usize = 132;
+    pub const BUMP: usize = 136;
+    pub const HEADER_LEN: usize = 144;
+    /// The owner set begins immediately after the header.
+    pub const OWNERS: usize = HEADER_LEN;
 }
 
-/// Offsets into a `Transaction` header, mirroring the on-chain layout.
+/// Offsets into a `Transaction` header. The vote bitmaps and message follow it.
 pub mod transaction_offset {
     pub const MULTISIG: usize = 0;
     pub const CREATOR: usize = 32;
     pub const INDEX: usize = 64;
     pub const APPROVED_AT: usize = 72;
-    pub const APPROVED: usize = 80;
-    pub const REJECTED: usize = 400;
-    pub const CANCELLED: usize = 720;
-    pub const APPROVED_COUNT: usize = 1040;
-    pub const REJECTED_COUNT: usize = 1041;
-    pub const CANCELLED_COUNT: usize = 1042;
-    pub const STATUS: usize = 1043;
-    pub const BUMP: usize = 1044;
-    pub const VAULT_INDEX: usize = 1045;
-    pub const VAULT_BUMP: usize = 1046;
-    pub const EPHEMERAL_COUNT: usize = 1047;
-    pub const EPHEMERAL_BUMPS: usize = 1048;
-    pub const MESSAGE_LEN: usize = 1052;
-    pub const HEADER_LEN: usize = 1056;
+    pub const OWNERS_COUNT: usize = 80;
+    pub const APPROVED_COUNT: usize = 84;
+    pub const REJECTED_COUNT: usize = 88;
+    pub const CANCELLED_COUNT: usize = 92;
+    pub const MESSAGE_LEN: usize = 96;
+    pub const STATUS: usize = 100;
+    pub const BUMP: usize = 101;
+    pub const VAULT_INDEX: usize = 102;
+    pub const VAULT_BUMP: usize = 103;
+    pub const EPHEMERAL_COUNT: usize = 104;
+    pub const EPHEMERAL_BUMPS: usize = 105;
+    pub const HEADER_LEN: usize = 112;
 }
 
 /// Status byte values.
@@ -94,6 +94,7 @@ pub mod err {
     pub const NO_VOTERS: u32 = 29;
     pub const UNAUTHORIZED: u32 = 30;
     pub const TRANSACTIONS_OUTSTANDING: u32 = 31;
+    pub const NOT_CONTROLLED: u32 = 32;
 }
 
 /// A wall-clock time for the test SVM. Mollusk defaults to zero, which would
@@ -101,10 +102,6 @@ pub mod err {
 pub const TEST_UNIX_TIMESTAMP: i64 = 1_700_000_000;
 
 /// The compiled program, read from the path cargo already knows.
-///
-/// Loading the ELF directly rather than letting Mollusk search for it means no
-/// `SBF_OUT_DIR` and no cargo config: `cargo test` works on its own, as long as
-/// `cargo build-sbf` has run.
 fn program_elf() -> Vec<u8> {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/target/deploy/multisig.so");
 
@@ -124,6 +121,50 @@ pub fn setup() -> Mollusk {
 
     mollusk.sysvars.clock.unix_timestamp = TEST_UNIX_TIMESTAMP;
     mollusk
+}
+
+/// Bytes the three vote bitmaps occupy for a given owner count.
+pub fn bitmap_len(owners: usize) -> usize {
+    owners.div_ceil(8)
+}
+
+/// Whether the bit at `index` is set.
+pub fn bit(bits: &[u8], index: usize) -> bool {
+    bits[index / 8] & (1 << (index % 8)) != 0
+}
+
+/// The three vote bitmaps of a proposal account.
+pub fn votes(data: &[u8], owners: usize) -> (&[u8], &[u8], &[u8]) {
+    let n = bitmap_len(owners);
+    let tail = &data[transaction_offset::HEADER_LEN..];
+
+    (&tail[..n], &tail[n..2 * n], &tail[2 * n..3 * n])
+}
+
+/// The message stored after the bitmaps.
+pub fn stored_message(data: &[u8], owners: usize) -> &[u8] {
+    &data[transaction_offset::HEADER_LEN + 3 * bitmap_len(owners)..]
+}
+
+/// A `u32` field of a header.
+pub fn u32_at(data: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes(data[at..at + 4].try_into().unwrap())
+}
+
+/// A `u64` field of a header.
+pub fn u64_at(data: &[u8], at: usize) -> u64 {
+    u64::from_le_bytes(data[at..at + 8].try_into().unwrap())
+}
+
+/// An owner address stored in a multisig account.
+pub fn owner_at(data: &[u8], index: usize) -> &[u8] {
+    let at = multisig_offset::HEADER_LEN + index * 32;
+    &data[at..at + 32]
+}
+
+/// An owner's permission mask.
+pub fn permission_at(data: &[u8], index: usize, owners: usize) -> u8 {
+    data[multisig_offset::HEADER_LEN + owners * 32 + index]
 }
 
 /// The multisig PDA for a create key.
@@ -177,6 +218,14 @@ pub fn system_account() -> (Pubkey, Account) {
     mollusk_svm::program::keyed_account_for_system_program()
 }
 
+/// This program's account, needed when a proposal targets it.
+pub fn program_account() -> (Pubkey, Account) {
+    (
+        PROGRAM_ID,
+        mollusk_svm::program::create_program_account_loader_v3(&PROGRAM_ID),
+    )
+}
+
 /// Distinct pubkeys, sorted ascending as the program requires.
 pub fn sorted_owners(n: usize) -> Vec<Pubkey> {
     let mut owners: Vec<Pubkey> = (0..n).map(|_| Pubkey::new_unique()).collect();
@@ -184,24 +233,47 @@ pub fn sorted_owners(n: usize) -> Vec<Pubkey> {
     owners
 }
 
-/// `init_multisig`.
+/// `init_multisig`, whose payload is a header followed by the owner addresses.
 pub fn init_multisig_ix(
     creator: &Pubkey,
     create_key: &Pubkey,
     multisig: &Pubkey,
     owners: &[Pubkey],
-    threshold: u8,
+    threshold: u32,
     bump: u8,
 ) -> Instruction {
+    init_multisig_ix_with_authority(
+        creator,
+        create_key,
+        multisig,
+        owners,
+        threshold,
+        bump,
+        &Pubkey::default(),
+    )
+}
+
+/// `init_multisig`, born controlled by `config_authority`.
+#[allow(clippy::too_many_arguments)]
+pub fn init_multisig_ix_with_authority(
+    creator: &Pubkey,
+    create_key: &Pubkey,
+    multisig: &Pubkey,
+    owners: &[Pubkey],
+    threshold: u32,
+    bump: u8,
+    config_authority: &Pubkey,
+) -> Instruction {
     let mut data = vec![0u8];
-    let mut payload = [0u8; 324];
-    for (i, owner) in owners.iter().enumerate() {
-        payload[i * 32..(i + 1) * 32].copy_from_slice(owner.as_ref());
+    data.extend_from_slice(&threshold.to_le_bytes());
+    data.extend_from_slice(&(owners.len() as u32).to_le_bytes());
+    data.push(bump);
+    data.extend_from_slice(&[0u8; 3]);
+    data.extend_from_slice(config_authority.as_ref());
+
+    for owner in owners {
+        data.extend_from_slice(owner.as_ref());
     }
-    payload[320] = owners.len() as u8;
-    payload[321] = threshold;
-    payload[322] = bump;
-    data.extend_from_slice(&payload);
 
     Instruction::new_with_bytes(
         PROGRAM_ID,
@@ -217,21 +289,15 @@ pub fn init_multisig_ix(
 
 /// One instruction inside a compiled message.
 pub struct MessageIx {
-    /// Index into the message's account keys naming the program.
     pub program_id_index: u8,
-    /// Indexes into the message's account keys.
     pub account_indexes: Vec<u8>,
-    /// Instruction payload.
     pub data: Vec<u8>,
 }
 
 /// One address lookup table reference inside a compiled message.
 pub struct MessageLookup {
-    /// The lookup table account.
     pub account_key: Pubkey,
-    /// Indexes loaded as writable.
     pub writable_indexes: Vec<u8>,
-    /// Indexes loaded as readonly.
     pub readonly_indexes: Vec<u8>,
 }
 
@@ -277,10 +343,6 @@ pub fn build_message(
 }
 
 /// A message transferring `lamports` from the vault to `destination`.
-///
-/// Keys are ordered by privilege: the vault is the only signer and is
-/// writable, the destination is a writable non-signer, and the system program
-/// is a readonly non-signer.
 pub fn transfer_message(vault: &Pubkey, destination: &Pubkey, lamports: u64) -> Vec<u8> {
     let mut data = 2u32.to_le_bytes().to_vec();
     data.extend_from_slice(&lamports.to_le_bytes());
@@ -308,7 +370,7 @@ pub fn config_message(action: u8, payload: &[u8]) -> Vec<u8> {
         0,
         0,
         0,
-        &[PROGRAM_ID],
+        &[PROGRAM_ID, SYSTEM_ID],
         &[MessageIx {
             program_id_index: 0,
             account_indexes: vec![],
@@ -316,6 +378,14 @@ pub fn config_message(action: u8, payload: &[u8]) -> Vec<u8> {
         }],
         &[],
     )
+}
+
+/// The accounts `execute` expects for a config action.
+pub fn config_accounts() -> Vec<AccountMeta> {
+    vec![
+        AccountMeta::new_readonly(PROGRAM_ID, false),
+        AccountMeta::new_readonly(SYSTEM_ID, false),
+    ]
 }
 
 /// `create_transaction`.
@@ -374,7 +444,7 @@ pub fn execute_ix(
     transaction: &Pubkey,
     message_accounts: &[AccountMeta],
 ) -> Instruction {
-    // Writable because a close action pays the reclaimed rent to the executor.
+    // Writable because a config action can move rent to or from the executor.
     let mut accounts = vec![
         AccountMeta::new(*executor, true),
         AccountMeta::new(*multisig, false),
@@ -383,6 +453,27 @@ pub fn execute_ix(
     accounts.extend_from_slice(message_accounts);
 
     Instruction::new_with_bytes(PROGRAM_ID, &[4u8], accounts)
+}
+
+/// `set_config`, the config authority's direct path.
+pub fn set_config_ix(
+    authority: &Pubkey,
+    multisig: &Pubkey,
+    action: u8,
+    payload: &[u8],
+) -> Instruction {
+    let mut data = vec![11u8, action];
+    data.extend_from_slice(payload);
+
+    Instruction::new_with_bytes(
+        PROGRAM_ID,
+        &data,
+        vec![
+            AccountMeta::new(*authority, true),
+            AccountMeta::new(*multisig, false),
+            AccountMeta::new_readonly(SYSTEM_ID, false),
+        ],
+    )
 }
 
 /// `close_transaction`.
@@ -421,7 +512,7 @@ pub fn buffer_create_ix(
     data.push(buffer_index);
     data.push(vault_index);
     data.push(bump);
-    data.push(0); // reserved
+    data.push(0);
     data.extend_from_slice(chunk);
 
     Instruction::new_with_bytes(

@@ -1,3 +1,23 @@
+#### 2026-09-05 04:24:56.253794573 UTC
+
+Solana CLI Version: Unknown
+
+| Name | CUs | Delta |
+|------|------|-------|
+| init_multisig | 1618 | -107 |
+| create_transaction | 2152 | -96 |
+| approve | 382 | -38 |
+| approve_latching | 513 | -73 |
+| reject | 392 | -67 |
+| cancel_active | 364 | +62 |
+| execute_transfer | 3762 | -23 |
+| execute_config | 1280 | -132 |
+| execute_two_transfers | 6675 | -22 |
+| close_transaction | 277 | -84 |
+| buffer_create | 1767 | +35 |
+| buffer_extend | 155 | +2 |
+| create_from_buffer | 2445 | -95 |
+
 #### 2026-09-04 12:21:18.065323835 UTC
 
 Solana CLI Version: solana-cli 4.2.1 (src:75f9b5b4; feat:21b0d33a, client:Agave)

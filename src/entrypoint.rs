@@ -12,6 +12,7 @@ use crate::instruction::{
     process_approve, process_buffer_close, process_buffer_create, process_buffer_extend,
     process_cancel, process_close_transaction, process_create_from_buffer,
     process_create_transaction, process_execute, process_init_multisig, process_reject,
+    process_set_config,
 };
 
 program_entrypoint!(process_instruction);
@@ -37,6 +38,7 @@ declare_id!("4X5zUZ8apTxg8XJSwyxCR6TpDbLFBxm9TjECocLTKpAm");
 /// | `8`  | [`process_buffer_extend`] |
 /// | `9`  | [`process_buffer_close`] |
 /// | `10` | [`process_create_from_buffer`] |
+/// | `11` | [`process_set_config`] |
 pub fn process_instruction(
     program_id: &Address,
     accounts: &mut [AccountView],
@@ -58,6 +60,7 @@ pub fn process_instruction(
         Some((8, rest)) => process_buffer_extend(program_id, accounts, rest),
         Some((9, rest)) => process_buffer_close(program_id, accounts, rest),
         Some((10, rest)) => process_create_from_buffer(program_id, accounts, rest),
+        Some((11, rest)) => process_set_config(program_id, accounts, rest),
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }

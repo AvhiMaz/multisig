@@ -108,7 +108,7 @@ fn main() {
     let after_cancel = advance(&mollusk, &[&create_ix, &cancel_ix], &base);
 
     let (config_tx, config_bump) = transaction_pda(&multisig, 1);
-    let config_msg = config_message(2, &[3u8]);
+    let config_msg = config_message(2, &3u32.to_le_bytes());
     let config_create = create_transaction_ix(
         &owners[0],
         &multisig,
@@ -119,12 +119,7 @@ fn main() {
         config_bump,
         &[],
     );
-    let config_execute = execute_ix(
-        &owners[0],
-        &multisig,
-        &config_tx,
-        &[AccountMeta::new_readonly(PROGRAM_ID, false)],
-    );
+    let config_execute = execute_ix(&owners[0], &multisig, &config_tx, &config_accounts());
     let after_config_approved = advance(&mollusk, &[&config_create, &approve_a, &approve_b], &base);
 
     let (buffer, buffer_bump) = buffer_pda(&multisig, &owners[0], 0);

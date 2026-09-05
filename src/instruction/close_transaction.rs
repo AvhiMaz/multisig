@@ -22,7 +22,7 @@ use crate::{
     },
 };
 
-/// Closes a terminal proposal, refunding rent to its creator.
+/// Closes a terminal proposal, refunding its rent to `destination`.
 pub fn process_close_transaction(
     program_id: &Address,
     accounts: &mut [AccountView],
@@ -42,7 +42,7 @@ pub fn process_close_transaction(
     let rent_collector = {
         // SAFETY: the only live borrow at this point.
         let multisig_data = unsafe { multisig.borrow_unchecked_mut() };
-        let ms = Multisig::load_mut(multisig_data)?;
+        let (ms, _, _) = Multisig::load_mut(multisig_data)?;
 
         // Counting closures is what lets `close_multisig` know later that
         // nothing is left outstanding.
@@ -60,7 +60,7 @@ pub fn process_close_transaction(
         // SAFETY: read-only borrow, released before the account is closed so
         // `close` does not see it as borrowed.
         let transaction_data = unsafe { transaction.borrow_unchecked() };
-        let (state, _) = Transaction::load(transaction_data)?;
+        let (state, _, _) = Transaction::load(transaction_data)?;
 
         validate_eq(
             &state.multisig,

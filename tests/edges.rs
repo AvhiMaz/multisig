@@ -20,7 +20,7 @@ struct Fixture {
     accounts: Vec<(Pubkey, Account)>,
 }
 
-fn fixture_with(mollusk: &mollusk_svm::Mollusk, owner_count: usize, threshold: u8) -> Fixture {
+fn fixture_with(mollusk: &mollusk_svm::Mollusk, owner_count: usize, threshold: u32) -> Fixture {
     let creator = Pubkey::new_unique();
     let create_key = Pubkey::new_unique();
     let (multisig, bump) = multisig_pda(&create_key);
@@ -173,7 +173,11 @@ fn a_full_owner_set_works() {
     let result = mollusk.process_and_validate_instruction_chain(&chain, &accounts);
 
     let tx = result.get_account(&transaction).unwrap();
-    assert_eq!(tx.data[tx_off::APPROVED_COUNT], 10, "all ten voted");
+    assert_eq!(
+        u32_at(&tx.data, tx_off::APPROVED_COUNT),
+        10,
+        "all ten voted"
+    );
     assert_eq!(tx.data[tx_off::STATUS], status::EXECUTED);
 }
 

@@ -3,7 +3,7 @@
 //! Any owner may propose. The proposal starts with no votes; the proposer
 //! approves separately if they want to.
 //!
-//! The payload is a three-byte header followed by a compiled message, and the
+//! The payload is an eight-byte header followed by a compiled message, and the
 //! account is sized to exactly that message. A proposal therefore costs rent
 //! for what it carries rather than for a worst case.
 //!
@@ -22,10 +22,11 @@ use pinocchio::{
 use pinocchio_system::{ID, instructions::CreateAccount};
 
 use crate::{
-    constants::{MAX_EPHEMERAL_SIGNERS, MAX_MESSAGE_SIZE, MAX_OWNER, TRANSACTION_SEED},
+    constants::{MAX_EPHEMERAL_SIGNERS, MAX_MESSAGE_SIZE, TRANSACTION_SEED},
     error::MultisigError,
     helper::{check_owner, check_signer, validate_eq},
     state::{
+        bitmap,
         message::TransactionMessage,
         multisig::Multisig,
         permission::Permission,
@@ -145,16 +146,16 @@ pub(crate) fn init_proposal(
 
     // Reserve the index, in its own scope so the multisig borrow ends before
     // the transaction account is borrowed.
-    let index = {
+    let (index, owners_count) = {
         // SAFETY: the only live borrow at this point.
         let multisig_data = unsafe { multisig.borrow_unchecked_mut() };
-        let ms = Multisig::load_mut(multisig_data)?;
+        let (ms, owners, permissions) = Multisig::load_mut(multisig_data)?;
 
-        if ms.is_owner(creator.address()).is_none() {
-            return Err(MultisigError::NotAnOwner.into());
-        }
+        let position =
+            Multisig::is_owner(owners, creator.address()).ok_or(MultisigError::NotAnOwner)?;
 
-        if !ms.has_permission(creator.address(), Permission::INITIATE) {
+        let mask = permissions[position];
+        if mask != 0 && mask & Permission::INITIATE == 0 {
             return Err(MultisigError::Unauthorized.into());
         }
 
@@ -165,7 +166,7 @@ pub(crate) fn init_proposal(
             .ok_or(MultisigError::Overflow)?;
 
         ms.transaction_index = index;
-        index
+        (index, ms.owners_count)
     };
 
     let index_bytes = index.to_le_bytes();
@@ -179,7 +180,7 @@ pub(crate) fn init_proposal(
     ];
 
     let signer_seeds = Signer::from(&seeds[..]);
-    let space = Transaction::space(message.len());
+    let space = Transaction::space(owners_count as usize, message.len());
 
     CreateAccount {
         from: creator,
@@ -195,7 +196,7 @@ pub(crate) fn init_proposal(
 
     // The header has not been written yet, so `message_len` cannot be trusted
     // to split the account.
-    let (state, stored_message) = Transaction::split_uninitialized(transaction_data)?;
+    let (state, tail) = Transaction::split_uninitialized(transaction_data)?;
 
     state.multisig = *multisig.address();
     state.creator = *creator.address();
@@ -203,9 +204,8 @@ pub(crate) fn init_proposal(
     state.approved_at = 0;
 
     // No votes yet; the proposer approves separately if they want to.
-    state.approved = [Address::default(); MAX_OWNER];
-    state.rejected = [Address::default(); MAX_OWNER];
-    state.cancelled = [Address::default(); MAX_OWNER];
+    // No votes yet; the bitmaps start clear.
+    state.owners_count = owners_count;
     state.approved_count = 0;
     state.rejected_count = 0;
     state.cancelled_count = 0;
@@ -217,7 +217,11 @@ pub(crate) fn init_proposal(
     state.ephemeral_count = ephemeral_count;
     state.ephemeral_bumps = ephemeral_bumps;
     state.message_len = message.len() as u32;
+    state._pad = [0u8; 3];
 
+    let bits = bitmap::len_for(owners_count as usize);
+    let (votes, stored_message) = tail.split_at_mut(3 * bits);
+    votes.fill(0);
     stored_message.copy_from_slice(message);
 
     state.invariant()

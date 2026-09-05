@@ -541,7 +541,7 @@ fn a_large_message_uploaded_across_four_chunks() {
     let tx = result.get_account(&transaction).unwrap();
     assert_eq!(tx.data[tx_off::STATUS], status::EXECUTED);
     assert_eq!(
-        &tx.data[tx_off::HEADER_LEN..],
+        stored_message(&tx.data, 3),
         &message[..],
         "the reassembled message is byte identical"
     );

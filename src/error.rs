@@ -24,7 +24,7 @@ pub enum MultisigError {
     InvalidInstructionData = 7,
     /// Owner count is zero or above `MAX_OWNER`.
     InvalidOwnerCount = 8,
-    /// Threshold is zero or exceeds the owner count.
+    /// Threshold is zero or exceeds the number of owners permitted to vote.
     InvalidThreshold = 9,
     /// The owner list is not strictly ascending, so it is unsorted or has a duplicate.
     OwnersNotSorted = 10,
@@ -32,7 +32,8 @@ pub enum MultisigError {
     NotAnOwner = 11,
     /// This owner has already voted on the transaction.
     AlreadyVoted = 12,
-    /// The transaction predates the last owner or threshold change.
+    /// The transaction predates the last change to the owner set, the
+    /// permissions or the threshold.
     StaleTransaction = 13,
     /// The transaction's status does not permit this action.
     InvalidStatus = 14,
@@ -71,6 +72,8 @@ pub enum MultisigError {
     Unauthorized = 30,
     /// Proposals remain unclosed, so closing the multisig would strand them.
     TransactionsOutstanding = 31,
+    /// The multisig is autonomous, so it has no config authority to act on.
+    NotControlled = 32,
 }
 
 impl From<MultisigError> for ProgramError {

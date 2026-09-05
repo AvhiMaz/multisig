@@ -1,10 +1,12 @@
 //! Compile-time limits and PDA seed prefixes.
 
-/// Maximum owners per multisig. Baked into [`Multisig::LEN`], so changing it
-/// breaks existing accounts.
+/// Maximum owners per multisig.
 ///
-/// [`Multisig::LEN`]: crate::state::multisig::Multisig::LEN
-pub const MAX_OWNER: usize = 10;
+/// Not a storage limit: the owner set is a variable-length tail and the account
+/// grows as it fills. The cap bounds the account at 135_312 bytes and the vote
+/// bitmaps at 512 bytes each, and keeps the binary search over the owner set to
+/// twelve comparisons.
+pub const MAX_OWNER: usize = 4096;
 
 /// Longest permitted delay between approval and execution, in seconds.
 ///
@@ -29,11 +31,18 @@ pub const MAX_MESSAGE_SIZE: usize = 4096;
 
 /// Largest number of accounts a single inner instruction may reference.
 ///
-/// Bounded by the runtime, which caps a stack-allocated CPI at 64 accounts.
+/// Sizes the arrays `execute` builds a CPI from. Those live on the stack, which
+/// an SBF frame limits to 4 KB, so this is well below the runtime's own cap.
 pub const MAX_CPI_ACCOUNTS: usize = 32;
 
 /// Seed prefix for a transaction buffer PDA, `["buffer", multisig, creator, index]`.
 pub const BUFFER_SEED: &[u8] = b"buffer";
+
+/// Seed prefix for an ephemeral signer PDA, `["ephemeral", transaction, index]`.
+pub const EPHEMERAL_SEED: &[u8] = b"ephemeral";
+
+/// Most ephemeral signers a single proposal may derive.
+pub const MAX_EPHEMERAL_SIGNERS: usize = 4;
 
 /// The Address Lookup Table program, which owns every lookup table account.
 pub const ADDRESS_LOOKUP_TABLE_ID: pinocchio::Address = pinocchio::Address::new_from_array(
@@ -42,12 +51,6 @@ pub const ADDRESS_LOOKUP_TABLE_ID: pinocchio::Address = pinocchio::Address::new_
 
 /// Bytes of a lookup table account before its addresses begin.
 pub const LOOKUP_TABLE_META_SIZE: usize = 56;
-
-/// Seed prefix for an ephemeral signer PDA, `["ephemeral", transaction, index]`.
-pub const EPHEMERAL_SEED: &[u8] = b"ephemeral";
-
-/// Most ephemeral signers a single proposal may derive.
-pub const MAX_EPHEMERAL_SIGNERS: usize = 4;
 
 /// Offset of `deactivation_slot` within a lookup table account.
 pub const LOOKUP_TABLE_DEACTIVATION_OFFSET: usize = 4;

@@ -1,7 +1,13 @@
 //! Multisig initialization.
 //!
-//! The only instruction authorized by a plain wallet signature. Later changes
-//! to the owner set go through propose, approve, and execute.
+//! Authorized by a plain wallet signature, since there is no owner set yet to
+//! ask. Later changes go through propose, approve and execute, or through the
+//! config authority named here if one is.
+//!
+//! The payload is a fixed header followed by the owner addresses, so a
+//! multisig is created at exactly the size it needs. A transaction caps the
+//! owners that fit here at roughly thirty; beyond that, create a small multisig
+//! and grow it with `add_owner`.
 //!
 //! # Accounts
 //!
@@ -22,30 +28,33 @@ use crate::{
     error::MultisigError,
     helper::{check_signer, validate_eq},
     state::multisig::Multisig,
-    utils::{impl_len, impl_load},
 };
 
-/// Payload for [`process_init_multisig`].
+/// Fixed header of the [`process_init_multisig`] payload, followed by the
+/// owner addresses.
 ///
-/// `owners` is always sent at full width so the payload stays fixed-size and
-/// parseable in place, and must be strictly ascending.
+/// Packed so it parses at any alignment: instruction data is not guaranteed to
+/// land on a word boundary.
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 pub struct InitMultisigData {
-    /// Candidate owners, of which the first `owners_count` are installed.
-    pub owners: [Address; MAX_OWNER],
-    /// Owners to install, in `1..=MAX_OWNER`.
-    pub owners_count: u8,
     /// Approvals needed to execute, in `1..=owners_count`.
-    pub threshold: u8,
+    pub threshold: u32,
+    /// Owners to install, in `1..=MAX_OWNER`.
+    pub owners_count: u32,
     /// PDA bump. Unvalidated: `invoke_signed` rejects a wrong one.
     pub bump: u8,
     /// Reserved.
-    pub _pad: [u8; 1],
+    pub _pad: [u8; 3],
+    /// Key permitted to change the configuration without a vote. The default
+    /// address leaves the multisig autonomous.
+    pub config_authority: [u8; 32],
 }
 
-impl_len!(InitMultisigData);
-impl_load!(InitMultisigData);
+impl InitMultisigData {
+    /// Size of the payload header in bytes.
+    pub const LEN: usize = core::mem::size_of::<Self>();
+}
 
 /// Creates and initializes a multisig configuration account.
 pub fn process_init_multisig(
@@ -80,13 +89,37 @@ pub fn process_init_multisig(
         return Err(MultisigError::AlreadyInitialized.into());
     }
 
-    let data = InitMultisigData::load(instruction)?;
+    if instruction.len() < InitMultisigData::LEN {
+        return Err(MultisigError::InvalidInstructionData.into());
+    }
+
+    // SAFETY: length checked above, and every field is byte-aligned under
+    // `#[repr(C, packed)]`.
+    let data = unsafe { &*(instruction.as_ptr() as *const InitMultisigData) };
+    let owner_bytes = &instruction[InitMultisigData::LEN..];
+
     let owners_count = data.owners_count as usize;
 
-    // Bounded here because the count indexes the array below. Every other rule
-    // is left to `Multisig::invariant`.
     if owners_count == 0 || owners_count > MAX_OWNER {
         return Err(MultisigError::InvalidOwnerCount.into());
+    }
+
+    if owner_bytes.len() != owners_count * 32 {
+        return Err(MultisigError::InvalidInstructionData.into());
+    }
+
+    // SAFETY: `Address` is `#[repr(transparent)]` over `[u8; 32]` with
+    // alignment 1, and the slice length was checked above.
+    let owners = unsafe {
+        core::slice::from_raw_parts(owner_bytes.as_ptr() as *const Address, owners_count)
+    };
+
+    // Strictly ascending proves sorted and duplicate-free in one pass. This is
+    // the only place the whole set is scanned; later changes check locally.
+    for i in 1..owners_count {
+        if owners[i - 1] >= owners[i] {
+            return Err(MultisigError::OwnersNotSorted.into());
+        }
     }
 
     let bump = [data.bump];
@@ -98,12 +131,13 @@ pub fn process_init_multisig(
     ];
 
     let signer_seeds = Signer::from(&seeds[..]);
+    let space = Multisig::space(owners_count);
 
     CreateAccount {
         from: creator,
         to: multisig,
-        space: Multisig::LEN as u64,
-        lamports: Rent::get()?.minimum_balance_unchecked(Multisig::LEN),
+        space: space as u64,
+        lamports: Rent::get()?.minimum_balance_unchecked(space),
         owner: program_id,
     }
     .invoke_signed(&[signer_seeds])?;
@@ -111,29 +145,27 @@ pub fn process_init_multisig(
     // SAFETY: just created by the CPI above, so no other borrow is live.
     let multisig_data = unsafe { multisig.borrow_unchecked_mut() };
 
-    let state = Multisig::load_mut(multisig_data)?;
+    // The header has not been written yet, so `owners_count` cannot be trusted
+    // to split the account.
+    let (state, tail) = Multisig::split_uninitialized(multisig_data)?;
 
     state.create_key = *create_key.address();
+    state.config_authority = Address::new_from_array(data.config_authority);
     state.rent_collector = Address::default();
-    state.owners = data.owners;
-    // Zero means every permission; a multisig opts in later via a config action.
-    state.permissions = [0u8; MAX_OWNER];
-
-    // Trailing slots are caller-controlled bytes; zero them so the stored owner
-    // set is canonical and a later add_owner cannot promote leftover data.
-    for slot in state.owners[owners_count..].iter_mut() {
-        *slot = Address::default();
-    }
-
-    state.owners_count = data.owners_count;
-    state.threshold = data.threshold;
-    state.bump = data.bump;
-    state._pad = [0u8; 3];
-    state.time_lock = 0;
-    state._pad2 = [0u8; 4];
     state.transaction_index = 0;
     state.stale_transaction_index = 0;
     state.closed_transaction_count = 0;
+    state.time_lock = 0;
+    state.owners_count = data.owners_count;
+    // Zero means every permission, so every owner starts able to vote.
+    state.voter_count = data.owners_count;
+    state.threshold = data.threshold;
+    state.bump = data.bump;
+    state._pad = [0u8; 7];
+
+    let (stored_owners, permissions) = tail.split_at_mut(owners_count * 32);
+    stored_owners.copy_from_slice(owner_bytes);
+    permissions.fill(0);
 
     state.invariant()
 }

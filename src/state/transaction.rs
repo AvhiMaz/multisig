@@ -1,15 +1,29 @@
 //! Transaction proposal account.
 //!
-//! The account is a fixed header followed by a variable-length compiled
-//! message, so a proposal costs rent for exactly the message it carries. That
-//! rules out the `impl_load!` pattern the other state structs use, which
-//! requires `data.len() == size_of::<Self>()`.
+//! A fixed header, three vote bitmaps sized to the owner count at creation,
+//! then the compiled message.
+//!
+//! # Layout
+//!
+//! ```text
+//! header       112 bytes
+//! approved     ceil(owners_count / 8)
+//! rejected     ceil(owners_count / 8)
+//! cancelled    ceil(owners_count / 8)
+//! message      message_len
+//! ```
+//!
+//! A vote is a bit at the owner's position. That names a voter safely because
+//! a proposal only accepts votes while the owner set it was created against is
+//! still current: any change to that set moves `stale_transaction_index` past
+//! the proposal. `owners_count` is the snapshot the bitmaps are sized to.
 
 use pinocchio::{Address, error::ProgramError};
 
 use crate::{
     constants::{MAX_EPHEMERAL_SIGNERS, MAX_MESSAGE_SIZE, MAX_OWNER},
     error::MultisigError,
+    state::bitmap,
 };
 
 /// Lifecycle of a proposal.
@@ -49,7 +63,45 @@ impl TransactionStatus {
     }
 }
 
-/// Fixed header of a proposal account. The compiled message follows it.
+/// The three vote bitmaps of a proposal.
+pub struct Votes<'a> {
+    /// Owners who approved.
+    pub approved: &'a [u8],
+    /// Owners who rejected.
+    pub rejected: &'a [u8],
+    /// Owners who voted to cancel after approval.
+    pub cancelled: &'a [u8],
+}
+
+impl Votes<'_> {
+    /// Whether the owner at `index` has voted any way.
+    pub fn has_voted(&self, index: usize) -> bool {
+        bitmap::get(self.approved, index)
+            || bitmap::get(self.rejected, index)
+            || bitmap::get(self.cancelled, index)
+    }
+}
+
+/// Mutable counterpart of [`Votes`].
+pub struct VotesMut<'a> {
+    /// Owners who approved.
+    pub approved: &'a mut [u8],
+    /// Owners who rejected.
+    pub rejected: &'a mut [u8],
+    /// Owners who voted to cancel after approval.
+    pub cancelled: &'a mut [u8],
+}
+
+impl VotesMut<'_> {
+    /// Whether the owner at `index` has voted any way.
+    pub fn has_voted(&self, index: usize) -> bool {
+        bitmap::get(self.approved, index)
+            || bitmap::get(self.rejected, index)
+            || bitmap::get(self.cancelled, index)
+    }
+}
+
+/// Fixed header of a proposal account.
 ///
 /// Stored at the PDA `["transaction", multisig, index]`.
 #[repr(C)]
@@ -64,19 +116,16 @@ pub struct Transaction {
     /// Unix time the proposal latched to `Approved`, or zero while `Active`.
     /// The multisig's time lock is measured from here.
     pub approved_at: i64,
-    /// Owners who approved, strictly ascending. Keys, not bit positions, so a
-    /// later change to the owner set cannot reassign a vote.
-    pub approved: [Address; MAX_OWNER],
-    /// Owners who rejected, strictly ascending.
-    pub rejected: [Address; MAX_OWNER],
-    /// Owners who voted to cancel after approval, strictly ascending.
-    pub cancelled: [Address; MAX_OWNER],
-    /// Live entries in `approved`.
-    pub approved_count: u8,
-    /// Live entries in `rejected`.
-    pub rejected_count: u8,
-    /// Live entries in `cancelled`.
-    pub cancelled_count: u8,
+    /// Owner count when this proposal was created, which sizes the bitmaps.
+    pub owners_count: u32,
+    /// Bits set in `approved`.
+    pub approved_count: u32,
+    /// Bits set in `rejected`.
+    pub rejected_count: u32,
+    /// Bits set in `cancelled`.
+    pub cancelled_count: u32,
+    /// Length of the compiled message.
+    pub message_len: u32,
     /// Current [`TransactionStatus`], decoded via `from_u8`.
     pub status: u8,
     /// Cached PDA bump for this account.
@@ -89,72 +138,97 @@ pub struct Transaction {
     pub ephemeral_count: u8,
     /// Cached bumps for those PDAs, positionally by index.
     pub ephemeral_bumps: [u8; MAX_EPHEMERAL_SIGNERS],
-    /// Length of the compiled message following this header.
-    pub message_len: u32,
+    /// Pads the header to a multiple of 8 bytes.
+    pub _pad: [u8; 3],
 }
 
 impl Transaction {
-    /// Size of the header in bytes. The account is this plus `message_len`.
+    /// Size of the header in bytes.
     pub const LEN: usize = core::mem::size_of::<Self>();
 
-    /// Account size needed to hold a message of `message_len` bytes.
-    pub fn space(message_len: usize) -> usize {
-        Self::LEN + message_len
+    /// Account size for `owners` owners and a message of `message_len` bytes.
+    pub fn space(owners: usize, message_len: usize) -> usize {
+        Self::LEN + 3 * bitmap::len_for(owners) + message_len
     }
 
-    /// Splits account data into the header and the message blob.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`MultisigError::InvalidAccountData`] if the data is too short,
-    /// misaligned, or its length disagrees with the header's `message_len`.
-    pub fn load(data: &[u8]) -> Result<(&Self, &[u8]), ProgramError> {
+    fn check(data: &[u8]) -> Result<(), ProgramError> {
         if data.len() < Self::LEN
             || !(data.as_ptr() as usize).is_multiple_of(core::mem::align_of::<Self>())
         {
             return Err(MultisigError::InvalidAccountData.into());
         }
 
-        let (header_bytes, message) = data.split_at(Self::LEN);
+        Ok(())
+    }
+
+    /// Splits account data into the header, the vote bitmaps, and the message.
+    pub fn load(data: &[u8]) -> Result<(&Self, Votes<'_>, &[u8]), ProgramError> {
+        Self::check(data)?;
+
+        let (header_bytes, tail) = data.split_at(Self::LEN);
 
         // SAFETY: length and alignment checked above; all padding is explicit.
         let header = unsafe { &*(header_bytes.as_ptr() as *const Self) };
 
-        if header.message_len as usize != message.len() {
+        let bits = bitmap::len_for(header.owners_count as usize);
+
+        if tail.len() != 3 * bits + header.message_len as usize {
             return Err(MultisigError::InvalidAccountData.into());
         }
 
-        Ok((header, message))
+        let (approved, rest) = tail.split_at(bits);
+        let (rejected, rest) = rest.split_at(bits);
+        let (cancelled, message) = rest.split_at(bits);
+
+        Ok((
+            header,
+            Votes {
+                approved,
+                rejected,
+                cancelled,
+            },
+            message,
+        ))
     }
 
     /// Mutable counterpart of [`Self::load`].
-    ///
-    /// # Errors
-    ///
-    /// Same conditions as [`Self::load`].
-    pub fn load_mut(data: &mut [u8]) -> Result<(&mut Self, &mut [u8]), ProgramError> {
+    pub fn load_mut(data: &mut [u8]) -> Result<(&mut Self, VotesMut<'_>, &mut [u8]), ProgramError> {
         if data.len() < Self::LEN
             || !(data.as_mut_ptr() as usize).is_multiple_of(core::mem::align_of::<Self>())
         {
             return Err(MultisigError::InvalidAccountData.into());
         }
 
-        let (header_bytes, message) = data.split_at_mut(Self::LEN);
+        let (header_bytes, tail) = data.split_at_mut(Self::LEN);
 
         // SAFETY: as in `load`; the exclusive reference rules out other borrows.
         let header = unsafe { &mut *(header_bytes.as_mut_ptr() as *mut Self) };
 
-        if header.message_len as usize != message.len() {
+        let bits = bitmap::len_for(header.owners_count as usize);
+
+        if tail.len() != 3 * bits + header.message_len as usize {
             return Err(MultisigError::InvalidAccountData.into());
         }
 
-        Ok((header, message))
+        let (approved, rest) = tail.split_at_mut(bits);
+        let (rejected, rest) = rest.split_at_mut(bits);
+        let (cancelled, message) = rest.split_at_mut(bits);
+
+        Ok((
+            header,
+            VotesMut {
+                approved,
+                rejected,
+                cancelled,
+            },
+            message,
+        ))
     }
 
     /// Splits data whose header has not been written yet.
     ///
-    /// Used only by `create_transaction`, between creating the account and
-    /// filling it in, when `message_len` cannot yet be trusted.
+    /// Used only between creating the account and filling it in, when neither
+    /// `owners_count` nor `message_len` can be trusted to describe the tail.
     pub fn split_uninitialized(data: &mut [u8]) -> Result<(&mut Self, &mut [u8]), ProgramError> {
         if data.len() < Self::LEN
             || !(data.as_mut_ptr() as usize).is_multiple_of(core::mem::align_of::<Self>())
@@ -162,12 +236,12 @@ impl Transaction {
             return Err(MultisigError::InvalidAccountData.into());
         }
 
-        let (header_bytes, message) = data.split_at_mut(Self::LEN);
+        let (header_bytes, tail) = data.split_at_mut(Self::LEN);
 
         // SAFETY: as in `load_mut`.
         let header = unsafe { &mut *(header_bytes.as_mut_ptr() as *mut Self) };
 
-        Ok((header, message))
+        Ok((header, tail))
     }
 
     /// Decoded status.
@@ -175,48 +249,27 @@ impl Transaction {
         TransactionStatus::from_u8(self.status)
     }
 
-    /// Owners who have approved.
-    pub fn approvers(&self) -> &[Address] {
-        &self.approved[..self.approved_count as usize]
-    }
-
-    /// Owners who have rejected.
-    pub fn rejecters(&self) -> &[Address] {
-        &self.rejected[..self.rejected_count as usize]
-    }
-
-    /// Owners who have voted to cancel.
-    pub fn cancellers(&self) -> &[Address] {
-        &self.cancelled[..self.cancelled_count as usize]
-    }
-
     /// Cached bumps for this proposal's ephemeral signers.
     pub fn ephemeral_bumps(&self) -> &[u8] {
         &self.ephemeral_bumps[..self.ephemeral_count as usize]
     }
 
-    /// Whether `owner` has already voted either way.
-    pub fn has_voted(&self, owner: &Address) -> bool {
-        self.approvers().binary_search(owner).is_ok()
-            || self.rejecters().binary_search(owner).is_ok()
-    }
-
-    /// Asserts every rule the header must satisfy. Call after any mutation.
+    /// Asserts every rule the header must satisfy. Constant time.
     pub fn invariant(&self) -> Result<(), ProgramError> {
         self.status()?;
 
-        let approved = self.approved_count as usize;
-        let rejected = self.rejected_count as usize;
+        let owners = self.owners_count as usize;
 
-        // A voter appears in at most one list, so the two together cannot
-        // exceed the owner cap.
-        if approved > MAX_OWNER || rejected > MAX_OWNER || approved + rejected > MAX_OWNER {
-            return Err(MultisigError::InvalidAccountData.into());
+        if owners == 0 || owners > MAX_OWNER {
+            return Err(MultisigError::InvalidOwnerCount.into());
         }
 
-        if self.cancelled_count as usize > MAX_OWNER
-            || self.ephemeral_count as usize > MAX_EPHEMERAL_SIGNERS
-        {
+        // Approving and rejecting are exclusive, so those two together cannot
+        // exceed the owner count. Cancelling is counted apart, because an owner
+        // who approved may later vote to cancel what they approved.
+        let votes = self.approved_count as usize + self.rejected_count as usize;
+
+        if votes > owners || self.cancelled_count as usize > owners {
             return Err(MultisigError::InvalidAccountData.into());
         }
 
@@ -224,22 +277,8 @@ impl Transaction {
             return Err(MultisigError::InvalidMessage.into());
         }
 
-        // Strictly ascending proves sorted and duplicate-free in one pass, and
-        // duplicates would let one owner count twice toward the threshold.
-        for i in 1..approved {
-            if self.approved[i - 1] >= self.approved[i] {
-                return Err(MultisigError::AlreadyVoted.into());
-            }
-        }
-        for i in 1..rejected {
-            if self.rejected[i - 1] >= self.rejected[i] {
-                return Err(MultisigError::AlreadyVoted.into());
-            }
-        }
-        for i in 1..self.cancelled_count as usize {
-            if self.cancelled[i - 1] >= self.cancelled[i] {
-                return Err(MultisigError::AlreadyVoted.into());
-            }
+        if self.ephemeral_count as usize > MAX_EPHEMERAL_SIGNERS {
+            return Err(MultisigError::InvalidAccountData.into());
         }
 
         Ok(())

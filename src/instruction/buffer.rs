@@ -93,13 +93,13 @@ pub fn process_buffer_create(
     {
         // SAFETY: read-only borrow, released with this scope.
         let multisig_data = unsafe { multisig.borrow_unchecked() };
-        let ms = Multisig::load(multisig_data)?;
+        let (_, owners, permissions) = Multisig::load(multisig_data)?;
 
-        if ms.is_owner(creator.address()).is_none() {
+        if Multisig::is_owner(owners, creator.address()).is_none() {
             return Err(MultisigError::NotAnOwner.into());
         }
 
-        if !ms.has_permission(creator.address(), Permission::INITIATE) {
+        if !Multisig::has_permission(owners, permissions, creator.address(), Permission::INITIATE) {
             return Err(MultisigError::Unauthorized.into());
         }
     }

@@ -5,7 +5,9 @@
 
 mod common;
 
-use common::{multisig_offset as ms_off, setup, status, transaction_offset as tx_off};
+use common::{
+    multisig_offset as ms_off, permission_at, setup, status, transaction_offset as tx_off,
+};
 use mollusk_svm::result::Check;
 use multisig::client::{self, Message, MessageInstruction, action, permission};
 use solana_account::Account;
@@ -279,7 +281,7 @@ fn a_permission_is_set_by_vote() {
 
     let ms = result.get_account(&w.multisig).unwrap();
     assert_eq!(
-        ms.data[ms_off::PERMISSIONS + 2],
+        permission_at(&ms.data, 2, 3),
         permission::VOTE | permission::EXECUTE
     );
 }

@@ -64,13 +64,9 @@ pub fn process_execute(
     let time_lock = {
         // SAFETY: read-only borrow, released with this scope.
         let multisig_data = unsafe { multisig.borrow_unchecked() };
-        let ms = Multisig::load(multisig_data)?;
+        let (ms, owners, permissions) = Multisig::load(multisig_data)?;
 
-        if ms.is_owner(executor.address()).is_none() {
-            return Err(MultisigError::NotAnOwner.into());
-        }
-
-        if !ms.has_permission(executor.address(), Permission::EXECUTE) {
+        if !Multisig::has_permission(owners, permissions, executor.address(), Permission::EXECUTE) {
             return Err(MultisigError::Unauthorized.into());
         }
 
@@ -86,7 +82,7 @@ pub fn process_execute(
         // SAFETY: the multisig borrow ended with the scope above, so this is
         // the only live borrow.
         let transaction_data = unsafe { transaction.borrow_unchecked_mut() };
-        let (state, _) = Transaction::load_mut(transaction_data)?;
+        let (state, _, _) = Transaction::load_mut(transaction_data)?;
 
         validate_eq(
             &state.multisig,
@@ -127,7 +123,7 @@ pub fn process_execute(
     // borrow is safe to hold across the CPIs below because `transaction` is
     // never one of the accounts passed to them.
     let transaction_data = unsafe { transaction.borrow_unchecked() };
-    let (_, stored_message) = Transaction::load(transaction_data)?;
+    let (_, _, stored_message) = Transaction::load(transaction_data)?;
 
     let message = TransactionMessage::parse(stored_message)?;
 
@@ -276,7 +272,7 @@ pub fn process_execute(
         // A config action is applied in place; invoking ourselves would only
         // re-enter this handler.
         if views[program_index].address() == program_id {
-            apply_config_action(multisig, executor, compiled.data)?;
+            apply_config_action(multisig, executor, compiled.data, true)?;
             continue;
         }
 
